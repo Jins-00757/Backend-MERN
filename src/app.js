@@ -9,6 +9,7 @@ import { connectDB } from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.routes.js';
 import salesforceRoutes from './routes/salesforce.routes.js';
+import dataRoutes from './routes/data.routes.js';
  
 // ============================================================================
 // Create Express App
@@ -63,7 +64,9 @@ connectDB().catch((error) => {
   // ========================================================================
   // Cookie Parser Middleware
   // ========================================================================
-  app.use(cookieParser());
+  // Signed so short-lived OAuth cookies (oauth_state/oauth_uid/oauth_verifier)
+  // can't be forged or tampered with client-side.
+  app.use(cookieParser(config.jwtSecret));
  
   // ========================================================================
   // Rate Limiting
@@ -77,16 +80,6 @@ connectDB().catch((error) => {
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => config.nodeEnv === 'development', // Skip in development
-  });
- 
-  // Auth-specific rate limiter (stricter)
-  const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // Limit to 5 requests per window
-    message: 'Too many login attempts, please try again later',
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => config.nodeEnv === 'development',
   });
  
   // Apply global rate limiter
@@ -107,11 +100,15 @@ connectDB().catch((error) => {
   // API Routes
   // ========================================================================
  
-  // Auth routes (with stricter rate limiting)
-  app.use('/api/auth', authLimiter, authRoutes);
- 
-  // Salesforce routes
+  // Salesforce OAuth routes (registered before the more general '/api/auth'
+  // mount so its unmatched paths are never shadowed by auth.routes.js)
   app.use('/api/auth/salesforce', salesforceRoutes);
+
+  // Auth routes
+  app.use('/api/auth', authRoutes);
+
+  // Data routes (Salesforce data)
+app.use('/api/data', dataRoutes);
  
   // ========================================================================
   // 404 Handler

@@ -22,16 +22,17 @@ export const config = {
  
   // Encryption
   encryptionKey: process.env.ENCRYPTION_KEY || 'your-32-char-encryption-key-here',
- 
+
   // Salesforce OAuth
-  salesforce: {
-    clientId: process.env.SALESFORCE_CLIENT_ID,
-    clientSecret: process.env.SALESFORCE_CLIENT_SECRET,
-    username: process.env.SALESFORCE_USERNAME,
-    redirectUri: process.env.SALESFORCE_REDIRECT_URI || 'http://localhost:5005/api/auth/salesforce/callback',
-    authUrl: process.env.SALESFORCE_AUTH_URL || 'https://login.salesforce.com/services/oauth2/authorize',
-    tokenUrl: process.env.SALESFORCE_TOKEN_URL || 'https://login.salesforce.com/services/oauth2/token',
-  },
+  salesforceClientId: process.env.SALESFORCE_CLIENT_ID,
+  salesforceClientSecret: process.env.SALESFORCE_CLIENT_SECRET,
+  salesforceUsername: process.env.SALESFORCE_USERNAME,
+  salesforceRedirectUri:
+    process.env.SALESFORCE_REDIRECT_URI || 'http://localhost:5005/api/auth/salesforce/callback',
+  salesforceAuthUrl:
+    process.env.SALESFORCE_AUTH_URL || 'https://login.salesforce.com/services/oauth2/authorize',
+  salesforceTokenUrl:
+    process.env.SALESFORCE_TOKEN_URL || 'https://login.salesforce.com/services/oauth2/token',
 };
  
 // ============================================================================
@@ -63,7 +64,7 @@ if (!config.mongodbUri) {
 }
  
 // Salesforce warning
-if (!config.salesforce.clientId || !config.salesforce.clientSecret) {
+if (!config.salesforceClientId || !config.salesforceClientSecret) {
   console.warn('⚠️  Warning: Salesforce credentials not configured - OAuth will not work');
 }
  
