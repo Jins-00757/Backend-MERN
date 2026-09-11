@@ -1,47 +1,39 @@
-import { config } from '../config/env.js';
- 
+import mongoose from 'mongoose';
+import { config } from './env.js';
+
 let isConnected = false;
- 
-/**
- * Connect to MongoDB
- * Logs connection status but allows app to run without DB
- */
+
 export const connectDB = async () => {
   if (isConnected) {
+    console.log('ℹ️  Using existing MongoDB connection');
     return;
   }
- 
+
   if (!config.mongodbUri) {
-    console.warn('⚠️  MongoDB URI not configured - database features will be limited');
+    console.warn('⚠️  MONGODB_URI not configured - skipping database connection');
     return;
   }
- 
+
   try {
-    await mongoose.connect(config.mongodbUri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
+    console.log('🔗 Connecting to MongoDB...');
+    const connection = await mongoose.connect(config.mongodbUri, {
+      retryWrites: true,
+      w: 'majority',
+      serverSelectionTimeoutMS: 10000,
     });
- 
     isConnected = true;
-    console.log('✅ MongoDB connected successfully');
-  } catch (err) {
-    console.error('❌ MongoDB connection failed:', err.message);
-    console.warn('⚠️  App will continue to run without database features');
-  }
-};
- 
-/**
- * Get connection status
- */
-export const isDBConnected = () => isConnected;
- 
-/**
- * Disconnect from MongoDB
- */
-export const disconnectDB = async () => {
-  if (isConnected) {
-    await mongoose.disconnect();
+    console.log('✅ MongoDB Connected Successfully');
+    console.log(`   Host: ${connection.connection.host}`);
+    console.log(`   Database: ${connection.connection.name}`);
+  } catch (error) {
+    console.error('❌ MongoDB Connection Failed:');
+    console.error(`   Error: ${error.message}`);
     isConnected = false;
-    console.log('✅ MongoDB disconnected');
   }
 };
+
+export const isDBConnected = () => {
+  return isConnected && mongoose.connection.readyState === 1;
+};
+
+export default { connectDB, isDBConnected };

@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import { config } from './config/env.js';
+import { connectDB } from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.routes.js';
 import salesforceRoutes from './routes/salesforce.routes.js';
@@ -15,6 +16,11 @@ import salesforceRoutes from './routes/salesforce.routes.js';
  
 export const createApp = () => {
   const app = express();
+
+  // Connect to MongoDB
+connectDB().catch((error) => {
+  console.error('Failed to connect to database:', error.message);
+});
  
   // ========================================================================
   // Trust Proxy (for production deployments behind a proxy)
