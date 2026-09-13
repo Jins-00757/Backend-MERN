@@ -21,7 +21,7 @@ const toPublicProfile = (user) => ({
   salesforceOrgName: user.salesforceOrgName,
   isSalesforceConnected: user.isSalesforceConnected,
   createdAt: user.createdAt,
-  lastLogin: user.lastLogin,
+  lastLogin: user.lastLoginAt,
 });
 
 /**
@@ -46,47 +46,52 @@ export const signup = async (req, res, next) => {
     // VALIDATION
     // ========================================================================
 
-    // Check all required fields
-    if (!name || !email || !password) {
-      return next(
-        new AppError('Name, email, and password are required', 400)
-      );
+    // Validate input
+    if (!name || !email || !password || !confirmPassword) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'All fields are required',
+      });
     }
 
     // Validate password strength
     if (password.length < 8) {
-      return next(
-        new AppError('Password must be at least 8 characters', 400)
-      );
+      return res.status(400).json({
+        status: 'error',
+        message: 'Password must be at least 8 characters',
+      });
     }
 
     // Validate password confirmation
     if (password !== confirmPassword) {
-      return next(
-        new AppError('Passwords do not match', 400)
-      );
+      return res.status(400).json({
+        status: 'error',
+        message: 'Passwords do not match',
+      });
     }
 
     // Validate email format (basic check, detailed validation in schema)
     const emailRegex = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
     if (!emailRegex.test(email)) {
-      return next(
-        new AppError('Please provide a valid email address', 400)
-      );
+      return res.status(400).json({
+        status: 'error',
+        message: 'Please provide a valid email address',
+      });
     }
 
     // Validate name length
     if (name.length < 2 || name.length > 100) {
-      return next(
-        new AppError('Name must be between 2 and 100 characters', 400)
-      );
+      return res.status(400).json({
+        status: 'error',
+        message: 'Name must be between 2 and 100 characters',
+      });
     }
 
     // ========================================================================
     // CHECK IF USER EXISTS
     // ========================================================================
 
-    const existingUser = await User.findByEmail(email);
+    const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
     if (existingUser) {
       return next(
         new AppError('Email already registered. Please login instead.', 409)
@@ -100,7 +105,7 @@ export const signup = async (req, res, next) => {
     const user = new User({
       name: name.trim(),
       email: email.toLowerCase().trim(),
-      passwordHash: password, // Will be hashed by pre-save middleware
+      password, // Will be hashed by pre-save middleware
       role: 'user',
       isEmailVerified: false,
     });
@@ -151,92 +156,91 @@ export const signup = async (req, res, next) => {
 // ============================================================================
 
 /**
- * POST /api/auth/login
- * Authenticate user and create session
+ * LOGIN - Authenticate user with email and password
  */
-export const login = async (req, res, next) => {
+export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // ========================================================================
-    // VALIDATION
-    // ========================================================================
-
+    // Validate input
     if (!email || !password) {
-      return next(
-        new AppError('Email and password are required', 400)
-      );
+      return res.status(400).json({
+        status: 'error',
+        message: 'Please provide email and password',
+      });
     }
 
-    // ========================================================================
-    // FIND USER
-    // ========================================================================
+    // Find user by email and include password field (select: false by default)
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
 
-    // Include password field for comparison
-    const user = await User.findByEmail(email).select('+passwordHash +lockUntil +loginAttempts');
-
-    if (!user || !user.isActive) {
-      return next(
-        new AppError('Invalid email or password', 401)
-      );
+    if (!user) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'Invalid email or password',
+      });
     }
 
-    // ========================================================================
-    // CHECK ACCOUNT LOCK
-    // ========================================================================
-
-    if (user.checkAccountLock()) {
-      return next(
-        new AppError(
-          `Account is locked due to multiple failed login attempts. Please try again in 30 minutes.`,
-          429
-        )
-      );
+    // Ensure password field exists in database
+    if (!user.password) {
+      console.error('❌ User password not found in database');
+      return res.status(500).json({
+        status: 'error',
+        message: 'Authentication failed - please try again or reset your password',
+      });
     }
 
-    // ========================================================================
-    // VERIFY PASSWORD
-    // ========================================================================
-
-    const isPasswordValid = await user.comparePassword(password);
-
-    if (!isPasswordValid) {
-      // Record failed login attempt
-      await user.recordFailedLogin();
-
-      return next(
-        new AppError('Invalid email or password', 401)
-      );
+    // Check if user is active
+    if (user.isInactive === true) {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Account is inactive. Please contact support.',
+      });
     }
 
-    // ========================================================================
-    // RECORD SUCCESSFUL LOGIN
-    // ========================================================================
+    // Compare passwords - FIX: Ensure both arguments exist
+    let isPasswordMatch = false;
+    try {
+      isPasswordMatch = await user.comparePassword(password);
+    } catch (compareError) {
+      console.error('❌ Password comparison error:', compareError);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Authentication failed',
+      });
+    }
 
-    await user.recordSuccessfulLogin(req.ip, req.get('user-agent'));
+    if (!isPasswordMatch) {
+      return res.status(401).json({
+        status: 'error',
+        message: 'Invalid email or password',
+      });
+    }
 
-    console.log(`✅ User logged in: ${user.email}`);
-
-    // ========================================================================
-    // GENERATE TOKEN & SET COOKIE
-    // ========================================================================
-
+    // Create JWT token and set the httpOnly cookie (shared with signup so
+    // both flows produce an identical, consistently-configured cookie)
     const token = generateToken(user._id, user.email, user.role);
     setTokenCookie(res, token);
 
-    // ========================================================================
-    // RESPONSE
-    // ========================================================================
+    // Update login timestamp
+    user.lastLoginAt = new Date();
+    user.loginCount = (user.loginCount || 0) + 1;
+    user.lastActivityAt = new Date();
+    await user.save();
 
     res.status(200).json({
       status: 'ok',
-      message: 'Logged in successfully',
       data: toPublicProfile(user),
     });
   } catch (error) {
-    next(error);
+    console.error('❌ Login error:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message || 'Login failed',
+    });
   }
 };
+
+
 
 // ============================================================================
 // LOGOUT - Clear session
@@ -281,7 +285,7 @@ export const getMe = async (req, res, next) => {
 
     const user = await User.findById(req.user._id);
 
-    if (!user || !user.isActive) {
+    if (!user || user.isInactive) {
       return next(
         new AppError('User not found or account is inactive', 404)
       );
@@ -411,7 +415,7 @@ export const changePassword = async (req, res, next) => {
     // VERIFY CURRENT PASSWORD
     // ========================================================================
 
-    const user = await User.findById(req.user._id).select('+passwordHash');
+    const user = await User.findById(req.user._id).select('+password');
 
     if (!user) {
       return next(
@@ -463,7 +467,7 @@ export const forgotPassword = async (req, res, next) => {
       );
     }
 
-    const user = await User.findByEmail(email);
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
 
     if (!user) {
       // For security, don't reveal if email exists

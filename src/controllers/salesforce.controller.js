@@ -143,9 +143,10 @@ export const handleSalesforceCallback = async (req, res) => {
       salesforceInstanceUrl: instance_url,
       salesforceAccessToken: encryptToken(access_token),
       salesforceRefreshToken: refresh_token ? encryptToken(refresh_token) : undefined,
-      salesforceTokenExpiry: expires_in ? new Date(Date.now() + expires_in * 1000) : undefined,
+      salesforceTokenExpiresAt: expires_in ? new Date(Date.now() + expires_in * 1000) : undefined,
       salesforceConnectedAt: new Date(),
       salesforceOrgName: orgName,
+      isSalesforceConnected: true,
     });
 
     console.log(`✅ Salesforce connected for user ${userId}`);
@@ -193,12 +194,13 @@ export const getSalesforceStatus = async (req, res) => {
 export const disconnectSalesforce = async (req, res) => {
   try {
     await User.findByIdAndUpdate(req.user._id, {
+      isSalesforceConnected: false,
       $unset: {
         salesforceUserId: '',
         salesforceInstanceUrl: '',
         salesforceAccessToken: '',
         salesforceRefreshToken: '',
-        salesforceTokenExpiry: '',
+        salesforceTokenExpiresAt: '',
         salesforceConnectedAt: '',
         salesforceOrgName: '',
       },

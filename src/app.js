@@ -8,6 +8,7 @@ import { config } from './config/env.js';
 import { connectDB } from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.routes.js';
+import salesforceAuthRoutes from './routes/salesforceAuth.routes.js';
 import salesforceRoutes from './routes/salesforce.routes.js';
 import dataRoutes from './routes/data.routes.js';
  
@@ -102,10 +103,13 @@ connectDB().catch((error) => {
  
   // Salesforce OAuth routes (registered before the more general '/api/auth'
   // mount so its unmatched paths are never shadowed by auth.routes.js)
-  app.use('/api/auth/salesforce', salesforceRoutes);
+  app.use('/api/auth/salesforce', salesforceAuthRoutes);
 
   // Auth routes
   app.use('/api/auth', authRoutes);
+
+  // Salesforce data CRUD routes (opportunities/accounts/contacts/bulk jobs)
+  app.use('/api/salesforce', salesforceRoutes);
 
   // Data routes (Salesforce data)
 app.use('/api/data', dataRoutes);
