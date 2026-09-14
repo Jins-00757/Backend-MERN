@@ -12,7 +12,7 @@ export const getContacts = async (req, res) => {
     const { accountId, limit = 50, offset = 0 } = req.query;
     const cacheKey = `contacts_${req.user._id}_${accountId}_${limit}_${offset}`;
 
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -27,7 +27,7 @@ export const getContacts = async (req, res) => {
       offset: Math.max(0, parseInt(offset)),
     });
 
-    cacheService.set(cacheKey, result, 300);
+    await cacheService.set(cacheKey, result, 300);
 
     res.status(200).json({
       success: true,
@@ -53,7 +53,7 @@ export const getContactById = async (req, res) => {
     const { id } = req.params;
     const cacheKey = `contact_${req.user._id}_${id}`;
 
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -78,7 +78,7 @@ export const getContactById = async (req, res) => {
     }
 
     const contact = result.records[0];
-    cacheService.set(cacheKey, contact, 300);
+    await cacheService.set(cacheKey, contact, 300);
 
     res.status(200).json({
       success: true,
@@ -120,7 +120,7 @@ export const createContact = async (req, res) => {
     });
 
     // Invalidate cache
-    cacheService.deleteByPrefix(`contacts_${req.user._id}`);
+    await cacheService.deleteByPrefix(`contacts_${req.user._id}`);
 
     res.status(201).json({
       success: true,
@@ -150,7 +150,7 @@ export const updateContact = async (req, res) => {
     await salesforce.updateContact(id, updates);
 
     // Invalidate cache
-    cacheService.delete(`contact_${req.user._id}_${id}`);
+    await cacheService.delete(`contact_${req.user._id}_${id}`);
 
     res.status(200).json({
       success: true,

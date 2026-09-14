@@ -1,22 +1,32 @@
 
-import WebSocket from 'ws';
+import { WebSocketServer } from 'ws';
+import { parseCookie as parseCookies } from 'cookie';
 import NotificationService from '../services/NotificationService.js';
-import { verifyToken } from './auth.js';
+import { verifyToken } from '../services/tokenService.js';
 
+/**
+ * Real-time notifications over WebSocket, authenticated the same way as the
+ * rest of the app: the httpOnly `token` cookie set by login/signup (see
+ * services/tokenService.js). The frontend can't read that cookie's value to
+ * pass it as a `?token=` query param - it doesn't need to, since browsers
+ * attach cookies to the WebSocket upgrade request automatically for
+ * same-site connections.
+ */
 export const setupWebSocket = (server) => {
-  const wss = new WebSocket.Server({ server });
+  const wss = new WebSocketServer({ server, path: '/ws' });
 
   wss.on('connection', (ws, req) => {
     try {
-      const token = new URL(`http://localhost${req.url}`).searchParams.get('token');
+      const cookies = parseCookies(req.headers.cookie || '');
+      const token = cookies.token;
+      const decoded = token ? verifyToken(token) : null;
 
-      if (!token) {
+      if (!decoded) {
         ws.close(4001, 'Unauthorized');
         return;
       }
 
-      const decoded = verifyToken(token);
-      const userId = decoded.id;
+      const userId = decoded._id;
 
       NotificationService.addConnection(userId, ws);
 

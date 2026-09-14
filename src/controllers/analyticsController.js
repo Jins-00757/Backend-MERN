@@ -20,7 +20,7 @@ export const getPipelineHealth = async (req, res) => {
       data: report,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });
@@ -36,7 +36,7 @@ export const getForecast = async (req, res) => {
       data: forecast,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });
@@ -52,7 +52,7 @@ export const getDealRisks = async (req, res) => {
       data: risks,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });
@@ -68,7 +68,7 @@ export const getTeamPerformance = async (req, res) => {
       data: performance,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });
@@ -85,7 +85,7 @@ export const getRevenueTrend = async (req, res) => {
       data: trends,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });

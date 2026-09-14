@@ -1,13 +1,13 @@
 
 import express from 'express';
-import { authenticate } from '../middleware/auth.js';
+import { protect } from '../middleware/auth.js';
 import { authorize } from '../middleware/rbac.js';
 import { salesforceLimiter } from '../middleware/rateLimiter.js';
 import * as analyticsController from '../controllers/analyticsController.js';
 
 const router = express.Router();
 
-router.use(authenticate);
+router.use(protect);
 router.use(salesforceLimiter);
 
 router.get(

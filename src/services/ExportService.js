@@ -1,17 +1,17 @@
 
-import { Parser } from 'json2csv';
+import { Parser } from '@json2csv/plainjs';
 import PDFDocument from 'pdfkit';
 
 class ExportService {
   async exportToCSV(opportunities) {
     try {
       const fields = [
-        'name',
-        'amount',
-        'stage',
-        'closeDate',
-        'probability',
-        'accountId',
+        'Name',
+        'Amount',
+        'StageName',
+        'CloseDate',
+        'Probability',
+        'AccountId',
       ];
 
       const parser = new Parser({ fields });
@@ -39,7 +39,7 @@ class ExportService {
       doc.moveDown();
 
       // Add summary
-      const totalValue = opportunities.reduce((sum, opp) => sum + (opp.amount || 0), 0);
+      const totalValue = opportunities.reduce((sum, opp) => sum + (opp.Amount || 0), 0);
       doc.fontSize(12).text('Pipeline Summary');
       doc.fontSize(10);
       doc.text(`Total Opportunities: ${opportunities.length}`);
@@ -51,10 +51,10 @@ class ExportService {
         title: 'Opportunities',
         headers: ['Opportunity Name', 'Amount', 'Stage', 'Close Date'],
         rows: opportunities.map((opp) => [
-          opp.name,
-          `$${(opp.amount || 0).toLocaleString()}`,
-          opp.stage,
-          new Date(opp.closeDate).toLocaleDateString(),
+          opp.Name,
+          `$${(opp.Amount || 0).toLocaleString()}`,
+          opp.StageName,
+          opp.CloseDate ? new Date(opp.CloseDate).toLocaleDateString() : '',
         ]),
       };
 

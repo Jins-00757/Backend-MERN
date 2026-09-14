@@ -3,6 +3,7 @@
 import SalesforceService, { soqlEscape } from '../services/salesforceService.js';
 import SyncLog from '../models/SyncLog.js';
 import cacheService from '../services/CacheService.js';
+import NotificationService from '../services/NotificationService.js';
 
 /**
  * @route   GET /api/salesforce/opportunities
@@ -15,7 +16,7 @@ export const getOpportunities = async (req, res) => {
     const cacheKey = `opp_list_${req.user._id}_${limit}_${offset}_${stage}`;
 
     // Check cache
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -34,7 +35,7 @@ export const getOpportunities = async (req, res) => {
     });
 
     // Cache for 5 minutes
-    cacheService.set(cacheKey, result, 300);
+    await cacheService.set(cacheKey, result, 300);
 
     res.status(200).json({
       success: true,
@@ -61,7 +62,7 @@ export const getOpportunityById = async (req, res) => {
     const { id } = req.params;
     const cacheKey = `opp_${req.user._id}_${id}`;
 
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -85,7 +86,7 @@ export const getOpportunityById = async (req, res) => {
     }
 
     const opportunity = result.records[0];
-    cacheService.set(cacheKey, opportunity, 300);
+    await cacheService.set(cacheKey, opportunity, 300);
 
     res.status(200).json({
       success: true,
@@ -136,7 +137,12 @@ export const createOpportunity = async (req, res) => {
     });
 
     // Invalidate cache
-    cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+
+    NotificationService.notify(req.user._id.toString(), 'opportunity.created', {
+      title: 'Opportunity created',
+      message: `${Name} was created`,
+    });
 
     res.status(201).json({
       success: true,
@@ -178,8 +184,13 @@ export const updateOpportunity = async (req, res) => {
     await salesforce.updateOpportunity(id, updates);
 
     // Invalidate cache
-    cacheService.delete(`opp_${req.user._id}_${id}`);
-    cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await cacheService.delete(`opp_${req.user._id}_${id}`);
+    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+
+    NotificationService.notify(req.user._id.toString(), 'opportunity.updated', {
+      title: 'Opportunity updated',
+      message: `${updates.Name || id} was updated`,
+    });
 
     res.status(200).json({
       success: true,
@@ -207,8 +218,13 @@ export const closeOpportunity = async (req, res) => {
     const salesforce = new SalesforceService(req.user);
     await salesforce.closeOpportunity(id, true, won);
 
-    cacheService.delete(`opp_${req.user._id}_${id}`);
-    cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await cacheService.delete(`opp_${req.user._id}_${id}`);
+    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+
+    NotificationService.notify(req.user._id.toString(), 'opportunity.closed', {
+      title: `Opportunity closed as ${won ? 'Won' : 'Lost'}`,
+      message: `Opportunity ${id} was closed as ${won ? 'Won' : 'Lost'}`,
+    });
 
     res.status(200).json({
       success: true,
@@ -235,8 +251,8 @@ export const deleteOpportunity = async (req, res) => {
     const salesforce = new SalesforceService(req.user);
     await salesforce.deleteOpportunity(id);
 
-    cacheService.delete(`opp_${req.user._id}_${id}`);
-    cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await cacheService.delete(`opp_${req.user._id}_${id}`);
+    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
 
     res.status(200).json({
       success: true,

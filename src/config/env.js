@@ -23,6 +23,10 @@ export const config = {
   // Encryption
   encryptionKey: process.env.ENCRYPTION_KEY || 'your-32-char-encryption-key-here',
 
+  // Redis (rate limiting + distributed caching)
+  redisHost: process.env.REDIS_HOST || 'localhost',
+  redisPort: parseInt(process.env.REDIS_PORT || '6379', 10),
+
   // Salesforce OAuth
   salesforceClientId: process.env.SALESFORCE_CLIENT_ID,
   salesforceClientSecret: process.env.SALESFORCE_CLIENT_SECRET,

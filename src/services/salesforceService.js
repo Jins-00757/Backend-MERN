@@ -1,6 +1,7 @@
 
 
 import axios from 'axios';
+import { Parser as CsvParser } from '@json2csv/plainjs';
 import User from '../models/User.js';
 import { encryptToken, decryptToken } from './encryptionService.js';
 
@@ -169,7 +170,7 @@ async getSalesPipelineSummary() {
         },
       };
 
-      if (data && (method === 'POST' || method === 'PATCH')) {
+      if (data && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
         config.data = data;
       }
 
@@ -476,10 +477,12 @@ async getSalesPipelineSummary() {
    * Create bulk job
    */
   async createBulkJob(operation, object) {
+    // Bulk API 2.0 ingest jobs only accept CSV - CSV is also the default,
+    // but set it explicitly since uploadBulkData() below always sends CSV.
     const jobData = {
       operation,
       object,
-      contentType: 'JSON',
+      contentType: 'CSV',
     };
 
     return this.request(
@@ -491,14 +494,20 @@ async getSalesPipelineSummary() {
   }
 
   /**
-   * Upload data to bulk job
+   * Upload data to bulk job. Bulk API 2.0's batches endpoint takes a raw CSV
+   * file body (Content-Type: text/csv) - it does not accept JSON, so the
+   * records array is converted to CSV here before upload.
    */
   async uploadBulkData(jobId, records) {
+    const fields = [...new Set(records.flatMap((record) => Object.keys(record)))];
+    const parser = new CsvParser({ fields });
+    const csv = parser.parse(records);
+
     return this.request(
       'PUT',
       `/jobs/ingest/${jobId}/batches`,
-      records,
-      { 'Content-Type': 'application/json' }
+      csv,
+      { 'Content-Type': 'text/csv' }
     );
   }
 

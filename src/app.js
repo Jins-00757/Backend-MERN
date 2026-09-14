@@ -6,16 +6,19 @@ import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import { config } from './config/env.js';
 import { connectDB } from './config/db.js';
+import { connectRedis } from './config/redisClient.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.routes.js';
 import salesforceAuthRoutes from './routes/salesforceAuth.routes.js';
 import salesforceRoutes from './routes/salesforce.routes.js';
 import dataRoutes from './routes/data.routes.js';
- 
+import analyticsRoutes from './routes/analytics.routes.js';
+import searchRoutes from './routes/search.routes.js';
+
 // ============================================================================
 // Create Express App
 // ============================================================================
- 
+
 export const createApp = () => {
   const app = express();
 
@@ -23,7 +26,17 @@ export const createApp = () => {
 connectDB().catch((error) => {
   console.error('Failed to connect to database:', error.message);
 });
- 
+
+  // Connect to Redis (rate limiting + caching). In practice this has
+  // already resolved by the time we get here: middleware/rateLimiter.js
+  // top-level-awaits the same connection (its RedisStore needs an open
+  // client to load its Lua script at construction time), and that import
+  // runs before this line. This call just reuses the cached promise; the
+  // .catch here is purely defensive.
+  connectRedis().catch((error) => {
+    console.error('Failed to connect to Redis:', error.message);
+  });
+
   // ========================================================================
   // Trust Proxy (for production deployments behind a proxy)
   // ========================================================================
@@ -113,7 +126,13 @@ connectDB().catch((error) => {
 
   // Data routes (Salesforce data)
 app.use('/api/data', dataRoutes);
- 
+
+  // Analytics routes (pipeline health, forecast, risks, team performance)
+  app.use('/api/analytics', analyticsRoutes);
+
+  // Search & export routes
+  app.use('/api/search', searchRoutes);
+
   // ========================================================================
   // 404 Handler
   // ========================================================================

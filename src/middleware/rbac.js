@@ -1,8 +1,14 @@
 
+import Team from '../models/Team.js';
+
+// Matches the `role` enum on the User model ('user', 'admin', 'manager') -
+// 'sales_rep'/'viewer' are kept as aliases for roles that don't exist yet
+// today but that the model's enum may grow to include.
 const rolePermissions = {
   admin: ['read:all', 'write:all', 'delete:all', 'manage:users', 'manage:settings'],
   manager: ['read:all', 'write:own', 'write:team', 'delete:own', 'manage:team'],
-  sales_rep: ['read:own', 'write:own', 'delete:own'],
+  user: ['read:all', 'write:own', 'delete:own'],
+  sales_rep: ['read:all', 'write:own', 'delete:own'],
   viewer: ['read:own'],
 };
 
@@ -54,7 +60,6 @@ export const checkTeamAccess = async (req, res, next) => {
 
   if (userRole === 'manager') {
     // Check if user manages this team
-    const Team = require('../models/Team').default;
     const team = await Team.findById(teamId);
 
     if (team?.managerId.toString() !== req.user._id.toString()) {

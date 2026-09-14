@@ -13,7 +13,7 @@ export const getAccounts = async (req, res) => {
     const cacheKey = `accounts_${req.user._id}_${limit}_${offset}_${search}`;
 
     // Check cache
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -30,7 +30,7 @@ export const getAccounts = async (req, res) => {
     });
 
     // Cache for 5 minutes
-    cacheService.set(cacheKey, result, 300);
+    await cacheService.set(cacheKey, result, 300);
 
     res.status(200).json({
       success: true,
@@ -56,7 +56,7 @@ export const getAccountById = async (req, res) => {
     const { id } = req.params;
     const cacheKey = `account_${req.user._id}_${id}`;
 
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -82,7 +82,7 @@ export const getAccountById = async (req, res) => {
     }
 
     const account = result.records[0];
-    cacheService.set(cacheKey, account, 300);
+    await cacheService.set(cacheKey, account, 300);
 
     res.status(200).json({
       success: true,
@@ -107,7 +107,7 @@ export const getAccountOpportunities = async (req, res) => {
     const { id } = req.params;
     const cacheKey = `account_opps_${req.user._id}_${id}`;
 
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -119,7 +119,7 @@ export const getAccountOpportunities = async (req, res) => {
     const salesforce = new SalesforceService(req.user);
     const result = await salesforce.getAccountWithOpportunities(id);
 
-    cacheService.set(cacheKey, result, 300);
+    await cacheService.set(cacheKey, result, 300);
 
     res.status(200).json({
       success: true,
@@ -162,7 +162,7 @@ export const createAccount = async (req, res) => {
     });
 
     // Invalidate cache
-    cacheService.deleteByPrefix(`accounts_${req.user._id}`);
+    await cacheService.deleteByPrefix(`accounts_${req.user._id}`);
 
     res.status(201).json({
       success: true,
@@ -196,9 +196,9 @@ export const updateAccount = async (req, res) => {
     await salesforce.updateAccount(id, updates);
 
     // Invalidate cache
-    cacheService.delete(`account_${req.user._id}_${id}`);
-    cacheService.delete(`account_opps_${req.user._id}_${id}`);
-    cacheService.deleteByPrefix(`accounts_${req.user._id}`);
+    await cacheService.delete(`account_${req.user._id}_${id}`);
+    await cacheService.delete(`account_opps_${req.user._id}_${id}`);
+    await cacheService.deleteByPrefix(`accounts_${req.user._id}`);
 
     res.status(200).json({
       success: true,

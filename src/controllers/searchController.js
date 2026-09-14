@@ -20,7 +20,7 @@ export const search = async (req, res) => {
       ...results,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });
@@ -42,7 +42,7 @@ export const getSuggestions = async (req, res) => {
       ...suggestions,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });
@@ -51,7 +51,9 @@ export const getSuggestions = async (req, res) => {
 
 export const exportData = async (req, res) => {
   try {
-    const { format, q, ...filters } = req.query;
+    // `format` is a route param (GET /export/:format), not a query string key
+    const { format } = req.params;
+    const { q, ...filters } = req.query;
 
     if (!['csv', 'pdf'].includes(format)) {
       return res.status(400).json({
@@ -75,7 +77,7 @@ export const exportData = async (req, res) => {
       doc.end();
     }
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: error.message,
     });

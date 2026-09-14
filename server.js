@@ -1,5 +1,6 @@
 import app from './src/app.js';
 import { config } from './src/config/env.js';
+import { setupWebSocket } from './src/middleware/websocket.js';
 
 // ============================================================================
 // Server Configuration
@@ -32,8 +33,13 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`   ✓ Server running on http://localhost:${PORT}`);
   console.log(`   ✓ Environment: ${config.nodeEnv}`);
   console.log(`   ✓ Listening on ${HOST}:${PORT}`);
+  console.log(`   ✓ WebSocket notifications on ws://${HOST}:${PORT}/ws`);
   console.log('\n========================================\n');
 });
+
+// Real-time notifications (see middleware/websocket.js) share this same
+// HTTP server/port rather than opening a second listener.
+setupWebSocket(server);
 
 // ============================================================================
 // Error Handlers

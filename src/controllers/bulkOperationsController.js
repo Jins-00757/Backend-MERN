@@ -1,8 +1,19 @@
 
 
+import { parse as parseCsv } from 'csv-parse/sync';
 import SalesforceService from '../services/salesforceService.js';
 import cacheService from '../services/CacheService.js';
 import BulkJob from '../models/BulkJob.js';
+
+/**
+ * Bulk API 2.0's successfulResults/failedResults endpoints return a raw CSV
+ * response body, not JSON - parse it into row objects so callers get a real
+ * array (and an accurate .length) instead of a CSV string.
+ */
+const parseBulkResultsCsv = (csv) => {
+  if (!csv || !csv.trim()) return [];
+  return parseCsv(csv, { columns: true, skip_empty_lines: true });
+};
 
 /**
  * @route   POST /api/salesforce/bulk/create-job
@@ -125,7 +136,7 @@ export const uploadBulkData = async (req, res) => {
     await bulkJob.save();
 
     // Invalidate cache
-    cacheService.delete(`bulk_status_${req.user._id}_${jobId}`);
+    await cacheService.delete(`bulk_status_${req.user._id}_${jobId}`);
 
     res.status(200).json({
       success: true,
@@ -181,7 +192,7 @@ export const closeBulkJob = async (req, res) => {
     await bulkJob.save();
 
     // Invalidate cache
-    cacheService.delete(`bulk_status_${req.user._id}_${jobId}`);
+    await cacheService.delete(`bulk_status_${req.user._id}_${jobId}`);
 
     res.status(200).json({
       success: true,
@@ -211,7 +222,7 @@ export const getBulkJobStatus = async (req, res) => {
     const cacheKey = `bulk_status_${req.user._id}_${jobId}`;
 
     // Check cache (30 second TTL for status)
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -234,6 +245,16 @@ export const getBulkJobStatus = async (req, res) => {
       bulkJob.salesforceJobId
     );
 
+    // Update job status if complete - before building statusData below, so
+    // its `status` field reflects the same call's result as `state` instead
+    // of lagging one poll behind.
+    if (['JobComplete', 'Failed', 'Aborted'].includes(statusResponse.state)) {
+      bulkJob.status = statusResponse.state === 'JobComplete' ? 'completed' : 'failed';
+      bulkJob.completedAt = new Date();
+      bulkJob.stateDetail = statusResponse.stateDetail;
+      await bulkJob.save();
+    }
+
     const statusData = {
       jobId,
       status: bulkJob.status,
@@ -252,15 +273,7 @@ export const getBulkJobStatus = async (req, res) => {
       startedAt: bulkJob.startedAt,
     };
 
-    // Update job status if complete
-    if (['JobComplete', 'Failed', 'Aborted'].includes(statusResponse.state)) {
-      bulkJob.status = statusResponse.state === 'JobComplete' ? 'completed' : 'failed';
-      bulkJob.completedAt = new Date();
-      bulkJob.stateDetail = statusResponse.stateDetail;
-      await bulkJob.save();
-    }
-
-    cacheService.set(cacheKey, statusData, 30);
+    await cacheService.set(cacheKey, statusData, 30);
 
     res.status(200).json({
       success: true,
@@ -287,7 +300,7 @@ export const getBulkJobResults = async (req, res) => {
     const cacheKey = `bulk_results_${req.user._id}_${jobId}`;
 
     // Check cache (5 minute TTL)
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -313,18 +326,19 @@ export const getBulkJobResults = async (req, res) => {
     }
 
     const salesforce = new SalesforceService(req.user);
-    const results = await salesforce.getBulkJobResults(bulkJob.salesforceJobId);
+    const rawResults = await salesforce.getBulkJobResults(bulkJob.salesforceJobId);
+    const results = parseBulkResultsCsv(rawResults);
 
     const resultData = {
       jobId,
       totalRecords: bulkJob.totalRecords,
-      successfulRecords: results?.length || 0,
-      failedRecords: (bulkJob.totalRecords || 0) - (results?.length || 0),
-      records: results || [],
+      successfulRecords: results.length,
+      failedRecords: Math.max(0, (bulkJob.totalRecords || 0) - results.length),
+      records: results,
       completedAt: bulkJob.completedAt,
     };
 
-    cacheService.set(cacheKey, resultData, 300);
+    await cacheService.set(cacheKey, resultData, 300);
 
     res.status(200).json({
       success: true,
@@ -350,7 +364,7 @@ export const getBulkJobFailedRecords = async (req, res) => {
     const { jobId } = req.params;
     const cacheKey = `bulk_failed_${req.user._id}_${jobId}`;
 
-    let cached = cacheService.get(cacheKey);
+    let cached = await cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json({
         success: true,
@@ -376,17 +390,18 @@ export const getBulkJobFailedRecords = async (req, res) => {
     }
 
     const salesforce = new SalesforceService(req.user);
-    const failedRecords = await salesforce.getBulkJobFailedRecords(
+    const rawFailedRecords = await salesforce.getBulkJobFailedRecords(
       bulkJob.salesforceJobId
     );
+    const failedRecords = parseBulkResultsCsv(rawFailedRecords);
 
     const failedData = {
       jobId,
-      failedCount: failedRecords?.length || 0,
-      records: failedRecords || [],
+      failedCount: failedRecords.length,
+      records: failedRecords,
     };
 
-    cacheService.set(cacheKey, failedData, 300);
+    await cacheService.set(cacheKey, failedData, 300);
 
     res.status(200).json({
       success: true,
