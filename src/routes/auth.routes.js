@@ -54,14 +54,14 @@ router.post('/login', authLimiter, login);
  * Request password reset token
  * Body: { email }
  */
-router.post('/forgot-password', forgotPassword);
+router.post('/forgot-password', authLimiter, forgotPassword);
 
 /**
  * POST /api/auth/reset-password
  * Reset password using reset token
  * Body: { token, newPassword, confirmPassword }
  */
-router.post('/reset-password', resetPassword);
+router.post('/reset-password', authLimiter, resetPassword);
 
 // ============================================================================
 // PROTECTED ROUTES (Authentication required)

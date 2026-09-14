@@ -27,6 +27,13 @@ export const config = {
   redisHost: process.env.REDIS_HOST || 'localhost',
   redisPort: parseInt(process.env.REDIS_PORT || '6379', 10),
 
+  // Outbound email (password reset, notifications)
+  emailHost: process.env.EMAIL_HOST || 'smtp.gmail.com',
+  emailPort: parseInt(process.env.EMAIL_PORT || '465', 10),
+  emailUser: process.env.EMAIL_USER,
+  emailPassword: process.env.EMAIL_PASSWORD,
+  emailFrom: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+
   // Salesforce OAuth
   salesforceClientId: process.env.SALESFORCE_CLIENT_ID,
   salesforceClientSecret: process.env.SALESFORCE_CLIENT_SECRET,
@@ -70,6 +77,11 @@ if (!config.mongodbUri) {
 // Salesforce warning
 if (!config.salesforceClientId || !config.salesforceClientSecret) {
   console.warn('⚠️  Warning: Salesforce credentials not configured - OAuth will not work');
+}
+
+// Email warning
+if (!config.emailUser || !config.emailPassword) {
+  console.warn('⚠️  Warning: EMAIL_USER/EMAIL_PASSWORD not configured - password reset emails will not send');
 }
  
 // Development warning

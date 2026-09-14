@@ -1,7 +1,9 @@
 import crypto from 'crypto';
 import User from '../models/User.js';
 import { generateToken, setTokenCookie, clearTokenCookie } from '../services/tokenService.js';
+import { sendPasswordResetEmail } from '../services/emailService.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { config } from '../config/env.js';
 
 /**
  * Shape a user document into the public profile sent to the client.
@@ -71,7 +73,7 @@ export const signup = async (req, res, next) => {
     }
 
     // Validate email format (basic check, detailed validation in schema)
-    const emailRegex = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
+    const emailRegex = /^[\w.+-]+@\w+([.-]?\w+)*(\.\w{2,3})+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({
         status: 'error',
@@ -491,13 +493,29 @@ export const forgotPassword = async (req, res, next) => {
     user.passwordResetExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
     await user.save();
 
-    console.log(`✅ Password reset token generated: ${user.email}`);
+    // ========================================================================
+    // SEND RESET EMAIL
+    // ========================================================================
 
-    // ========================================================================
-    // TODO: Send email with reset link
-    // In production, send email to user.email with:
-    // ${process.env.CLIENT_URL}/reset-password?token=${resetToken}
-    // ========================================================================
+    const resetUrl = `${config.clientUrl}/reset-password?token=${resetToken}`;
+
+    try {
+      await sendPasswordResetEmail({ to: user.email, name: user.name, resetUrl });
+      console.log(`✅ Password reset email sent: ${user.email}`);
+    } catch (emailError) {
+      // The token is useless without the email that carries it - clear it
+      // so it doesn't linger as a valid-but-unreachable reset path, and
+      // let the user try again once email delivery is fixed.
+      user.passwordResetToken = undefined;
+      user.passwordResetExpiry = undefined;
+      await user.save();
+
+      console.error(`❌ Failed to send password reset email to ${user.email}:`, emailError.message);
+
+      return next(
+        new AppError('Could not send password reset email. Please try again shortly.', 500)
+      );
+    }
 
     res.status(200).json({
       status: 'ok',
