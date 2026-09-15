@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler.js';
 import { encryptField, decryptFieldAudited } from '../services/encryptionService.js';
 import {
   generateSecret,
+  buildOtpauthUrl,
   generateQRCodeDataUrl,
   verifyTotp,
   generateBackupCodes,
@@ -65,10 +66,19 @@ const logTwoFactorEvent = (req, { userId, action, status, errorMessage }) =>
 
 /**
  * POST /api/auth/2fa/setup
- * Protected. Generates a new TOTP secret and stores it, encrypted, as a
- * *pending* secret - it only becomes the account's active secret once
- * POST /2fa/verify-setup proves the user actually has it loaded in an
- * authenticator app.
+ * Protected. Stores (and returns the QR for) a *pending* secret - it only
+ * becomes the account's active secret once POST /2fa/verify-setup proves
+ * the user actually has it loaded in an authenticator app.
+ *
+ * BUG FIX: this used to mint a brand-new secret on every call. Reopening
+ * the setup panel - a page reload, clicking Cancel then Enable 2FA again,
+ * a second browser tab - silently replaced the pending secret, orphaning
+ * whatever QR the user had already scanned into their authenticator app:
+ * every code their app produced afterward would be checked against a
+ * secret the server no longer recognized, and setup could never succeed
+ * no matter how correctly they typed the code. Now reuses an existing
+ * pending secret (just re-rendering its QR) if one is already there, and
+ * only mints a new one when there's genuinely nothing pending yet.
  */
 export const setupTwoFactor = async (req, res, next) => {
   try {
@@ -76,12 +86,25 @@ export const setupTwoFactor = async (req, res, next) => {
       return next(new AppError('Two-factor authentication is already enabled', 409));
     }
 
-    const { base32, otpauthUrl } = generateSecret(req.user.email);
-    const qrCode = await generateQRCodeDataUrl(otpauthUrl);
+    const user = await User.findById(req.user._id).select('+twoFactorPendingSecret');
 
-    await User.findByIdAndUpdate(req.user._id, {
-      twoFactorPendingSecret: encryptField(base32),
-    });
+    let base32;
+    if (user.twoFactorPendingSecret) {
+      base32 = decryptFieldAudited(user.twoFactorPendingSecret, {
+        userId: user._id,
+        resourceId: user._id,
+        fieldName: 'twoFactorPendingSecret',
+        req,
+      });
+    } else {
+      base32 = generateSecret(user.email).base32;
+      await User.findByIdAndUpdate(user._id, {
+        twoFactorPendingSecret: encryptField(base32),
+      });
+    }
+
+    const otpauthUrl = buildOtpauthUrl(base32, user.email);
+    const qrCode = await generateQRCodeDataUrl(otpauthUrl);
 
     res.status(200).json({
       status: 'ok',

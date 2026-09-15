@@ -4,8 +4,18 @@ import Team from '../models/Team.js';
 // Matches the `role` enum on the User model ('user', 'admin', 'manager') -
 // 'sales_rep'/'viewer' are kept as aliases for roles that don't exist yet
 // today but that the model's enum may grow to include.
+// BUG FIX: 'admin' used to be missing 'manage:team' entirely - since
+// authorize() checks for exact permission strings (no role hierarchy, no
+// "admin implies manager" logic), any route gated with just
+// authorize(['manage:team']) and no admin-inclusive fallback (unlike
+// canWrite/canDelete elsewhere, which explicitly list 'write:all'/
+// 'delete:all' alongside the lower-role permissions) rejected admin with
+// a 403 while manager passed - a lower role had strictly more access than
+// the top one. Confirmed live against /api/analytics/team-performance
+// (pre-existing) and the new /api/teams routes. Admin's permission set
+// should always be a superset of manager's.
 const rolePermissions = {
-  admin: ['read:all', 'write:all', 'delete:all', 'manage:users', 'manage:settings'],
+  admin: ['read:all', 'write:all', 'delete:all', 'manage:users', 'manage:settings', 'manage:team'],
   manager: ['read:all', 'write:own', 'write:team', 'delete:own', 'manage:team'],
   user: ['read:all', 'write:own', 'delete:own'],
   sales_rep: ['read:all', 'write:own', 'delete:own'],
@@ -60,7 +70,14 @@ export const checkOwnership = (req, res, next) => {
 
 export const checkTeamAccess = async (req, res, next) => {
   const userRole = req.user?.role;
-  const teamId = req.params.teamId || req.body.teamId;
+  // BUG FIX: this read only req.params.teamId, but every route in this
+  // codebase (accountsController, contactsController, opportunitiesController,
+  // and now team.routes.js) names its id param `:id`, not `:teamId` - so
+  // teamId was always undefined, Team.findById(undefined) always resolved
+  // null, and every manager was rejected even from their own team. This
+  // middleware was defined but never actually wired to a route until
+  // team.routes.js, so the bug was never exercised until now.
+  const teamId = req.params.id || req.params.teamId || req.body.teamId;
 
   if (userRole === 'admin') {
     return next();

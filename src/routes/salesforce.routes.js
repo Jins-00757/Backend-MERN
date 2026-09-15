@@ -10,6 +10,7 @@ import * as contactsCtrl from '../controllers/contactsController.js';
 import * as bulkCtrl from '../controllers/bulkOperationsController.js';
 import * as leadsCtrl from '../controllers/leadsController.js';
 import * as contractsCtrl from '../controllers/contractsController.js';
+import * as mapCtrl from '../controllers/mapController.js';
 
 const router = express.Router();
 
@@ -60,6 +61,12 @@ router.get('/accounts/:id', authorize(['read:all']), accountsCtrl.getAccountById
 router.get('/accounts/:id/opportunities', authorize(['read:all']), accountsCtrl.getAccountOpportunities);
 router.post('/accounts', canWrite, accountsCtrl.createAccount);
 router.patch('/accounts/:id', canWrite, accountsCtrl.updateAccount);
+
+// ========================================================================
+// MAP ROUTES
+// ========================================================================
+
+router.get('/map/accounts', authorize(['read:all']), mapCtrl.getAccountsMap);
 
 // ========================================================================
 // CONTACTS ROUTES

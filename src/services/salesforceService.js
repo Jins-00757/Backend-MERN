@@ -89,52 +89,83 @@ class SalesforceService {
   }
 
   /**
-   * Check if token needs refresh
+   * Proactively refresh only when we actually know the token is near
+   * expiry. `tokenExpiresAt` is almost always unset in practice - Salesforce
+   * never returns `expires_in` from its OAuth token endpoint (see
+   * refreshAccessToken()), so there is usually nothing to proactively check
+   * here. That's expected, not a bug: the real defense against a stale
+   * access token is the reactive refresh-and-retry-once in request() below,
+   * which refreshes only when Salesforce actually responds 401 - the one
+   * signal we can trust, since we can't predict expiry ourselves.
    */
   async ensureValidToken() {
-    const now = new Date();
-    const expirationBuffer = 5 * 60 * 1000; // 5 minutes
+    if (!this.tokenExpiresAt) return;
 
-    if (
-      this.tokenExpiresAt &&
-      now.getTime() >
-        this.tokenExpiresAt.getTime() - expirationBuffer
-    ) {
+    const expirationBuffer = 5 * 60 * 1000; // 5 minutes
+    const isNearExpiry = Date.now() > this.tokenExpiresAt.getTime() - expirationBuffer;
+
+    if (isNearExpiry) {
       await this.refreshAccessToken();
     }
   }
 
   /**
-   * Refresh access token using refresh token
+   * Refresh access token using refresh token.
+   *
+   * BUG FIX: Salesforce's OAuth token endpoint (like every RFC 6749 token
+   * endpoint) requires `application/x-www-form-urlencoded`, not JSON - the
+   * previous plain-object body was silently serialized as JSON by axios,
+   * which Salesforce rejected with `400 unsupported_grant_type` on every
+   * single call. Confirmed empirically against a live org: the JSON body
+   * fails immediately, the form-encoded body succeeds.
+   *
+   * BUG FIX: Salesforce's token response also never includes `expires_in`
+   * (confirmed on the same live call - the response only has access_token,
+   * refresh_token, signature, scope, instance_url, id, token_type,
+   * issued_at) - unlike most OAuth providers, Salesforce access token
+   * lifetime is governed by the org's Session Settings, not returned here.
+   * The old code computed `Date.now() + undefined * 1000` = Invalid Date
+   * and stored that. Rather than fabricate an expiry we don't have, leave
+   * `salesforceTokenExpiresAt` unset - staleness is instead handled
+   * reactively (see request()'s 401 retry) rather than proactively.
+   *
+   * BUG FIX: this org's connected app rotates the refresh token on every
+   * use - each refresh response's `refresh_token` supersedes the one that
+   * was just spent, and the old one stops working immediately. The old
+   * code only persisted the new access_token, silently discarding the
+   * rotated refresh_token - so the very next refresh attempt would fail
+   * with `invalid_grant: expired access/refresh token`, permanently
+   * breaking the connection after exactly one refresh. Now persists
+   * whichever refresh_token Salesforce returned (falling back to the
+   * existing one on the - apparently rare, for this org - response that
+   * omits it, rather than overwriting a working token with undefined).
    */
   async refreshAccessToken() {
     try {
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: process.env.SALESFORCE_CLIENT_ID,
+        client_secret: process.env.SALESFORCE_CLIENT_SECRET,
+        refresh_token: this.refreshToken,
+      });
+
       const response = await axios.post(
         `${this.instanceUrl}/services/oauth2/token`,
-        {
-          grant_type: 'refresh_token',
-          client_id: process.env.SALESFORCE_CLIENT_ID,
-          client_secret: process.env.SALESFORCE_CLIENT_SECRET,
-          refresh_token: this.refreshToken,
-        }
+        params.toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
 
       this.accessToken = response.data.access_token;
+      if (response.data.refresh_token) {
+        this.refreshToken = response.data.refresh_token;
+      }
 
-      // Update user in database with new token
+      // Update user in database with new token(s)
       await User.findByIdAndUpdate(this.user._id, {
-        salesforceAccessToken: this.encryptToken(
-          response.data.access_token
-        ),
-        salesforceTokenExpiresAt: new Date(
-          Date.now() + response.data.expires_in * 1000
-        ),
+        salesforceAccessToken: this.encryptToken(this.accessToken),
+        salesforceRefreshToken: this.encryptToken(this.refreshToken),
       });
 
-      this.tokenExpiresAt = new Date(
-        Date.now() + response.data.expires_in * 1000
-      );
-      
       console.log('✅ Access token refreshed');
     } catch (error) {
       console.error('Token refresh failed:', error.message);
@@ -187,7 +218,8 @@ async getSalesPipelineSummary() {
     endpoint,
     data = null,
     headers = {},
-    retryCount = 0
+    retryCount = 0,
+    hasRetriedAuth = false
   ) {
     try {
       await this.ensureValidToken();
@@ -210,6 +242,17 @@ async getSalesPipelineSummary() {
       const response = await axios(config);
       return response.data;
     } catch (error) {
+      // Reactive refresh: since ensureValidToken() usually has no expiry to
+      // check against (see its docstring), a 401 here is the one reliable
+      // signal that the access token is actually stale. Refresh once and
+      // retry the exact same request - if the refresh itself fails (e.g. a
+      // genuinely revoked refresh token), that error propagates as-is
+      // rather than masking it behind a second, confusing 401.
+      if (error.response?.status === 401 && !hasRetriedAuth) {
+        await this.refreshAccessToken();
+        return this.request(method, endpoint, data, headers, retryCount, true);
+      }
+
       // Retry on 429 (rate limit) or 503 (service unavailable)
       const retryable = [429, 503].includes(error.response?.status);
 
@@ -224,7 +267,8 @@ async getSalesPipelineSummary() {
           endpoint,
           data,
           headers,
-          retryCount + 1
+          retryCount + 1,
+          hasRetriedAuth
         );
       }
 
@@ -404,7 +448,8 @@ async getSalesPipelineSummary() {
   async getAccounts(filters = {}) {
     const { limit = 100, offset = 0, searchTerm } = filters;
 
-    let soql = `SELECT Id, Name, BillingCity, BillingState, 
+    let soql = `SELECT Id, Name, BillingStreet, BillingCity, BillingState,
+                       BillingPostalCode, BillingCountry,
                        Industry, AnnualRevenue, Phone, Website,
                        CreatedDate FROM Account`;
 
@@ -415,6 +460,32 @@ async getSalesPipelineSummary() {
     soql += ` ORDER BY Name ASC LIMIT ${limit} OFFSET ${offset}`;
 
     return this.query(soql);
+  }
+
+  /**
+   * Per-account opportunity count + total pipeline value, in one grouped
+   * query instead of N per-account queries - used by the accounts map
+   * (mapController.js) to annotate each pin without an N+1 fetch.
+   */
+  async getOpportunityTotalsByAccountIds(accountIds) {
+    if (!accountIds || accountIds.length === 0) return {};
+
+    const idList = accountIds.map((id) => `'${soqlEscape(id)}'`).join(',');
+    const soql = `SELECT AccountId, COUNT(Id) oppCount, SUM(Amount) totalAmount
+                  FROM Opportunity
+                  WHERE AccountId IN (${idList})
+                  GROUP BY AccountId`;
+
+    const result = await this.query(soql);
+
+    const totalsByAccountId = {};
+    for (const record of result.records) {
+      totalsByAccountId[record.AccountId] = {
+        opportunityCount: record.oppCount,
+        pipelineValue: record.totalAmount || 0,
+      };
+    }
+    return totalsByAccountId;
   }
 
   /**

@@ -14,6 +14,7 @@ import salesforceAuthRoutes from './routes/salesforceAuth.routes.js';
 import salesforceRoutes from './routes/salesforce.routes.js';
 import dataRoutes from './routes/data.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
+import teamRoutes from './routes/team.routes.js';
 import saasMetricsRoutes from './routes/saasMetrics.routes.js';
 import searchRoutes from './routes/search.routes.js';
 import exportRoutes from './routes/export.routes.js';
@@ -135,6 +136,9 @@ app.use('/api/data', dataRoutes);
 
   // Analytics routes (pipeline health, forecast, risks, team performance)
   app.use('/api/analytics', analyticsRoutes);
+
+  // Team CRUD (name, manager, members) - manager/admin only, see team.routes.js
+  app.use('/api/teams', teamRoutes);
 
   // SaaS/Technology vertical routes (ARR forecast, churn risk, customer
   // health, expansion opportunities)

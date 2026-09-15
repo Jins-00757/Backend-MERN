@@ -1,5 +1,7 @@
 
-import SalesforceService from './salesforceService.js';
+import SalesforceService, { soqlEscape } from './salesforceService.js';
+import Team from '../models/Team.js';
+import User from '../models/User.js';
 
 /**
  * Re-throw with a friendlier message while preserving the original error's
@@ -136,13 +138,82 @@ class AnalyticsService {
     }
   }
 
-  // Rep Performance within the connected org
-  async getTeamPerformance(user) {
+  /**
+   * Resolve which Salesforce OwnerIds a team-performance report should be
+   * scoped to:
+   *  - manager: always their own team(s) (Team.managerId === them) - never
+   *    org-wide, even with no teamId given. If they manage more than one
+   *    team, an explicit teamId narrows to just that one; the query itself
+   *    (managerId: user._id) makes it impossible to pass someone else's
+   *    teamId and see their data, the same protection checkTeamAccess
+   *    gives the /api/teams routes.
+   *  - admin with an explicit teamId: that specific team, any manager's.
+   *  - admin with no teamId: null, meaning "no scoping" - preserves the
+   *    original org-wide behavior as the default so nothing already
+   *    depending on it breaks.
+   *
+   * Team membership (Mongo User ids) is translated to Salesforce OwnerIds
+   * via each member's salesforceUserId (set once they connect their own
+   * Salesforce account - see salesforce.controller.js's OAuth callback);
+   * members who haven't connected Salesforce are excluded, since there's no
+   * Salesforce identity to attribute Opportunities to.
+   */
+  async resolveTeamOwnerIds(user, teamId) {
+    let teams;
+
+    if (user.role === 'admin') {
+      if (!teamId) return null;
+
+      const team = await Team.findById(teamId);
+      if (!team) {
+        const err = new Error('Team not found');
+        err.status = 404;
+        throw err;
+      }
+      teams = [team];
+    } else {
+      const query = { managerId: user._id, isActive: true };
+      if (teamId) query._id = teamId;
+      teams = await Team.find(query);
+    }
+
+    const memberIds = new Set();
+    teams.forEach((team) => {
+      memberIds.add(team.managerId.toString());
+      team.members.forEach((m) => memberIds.add(m.toString()));
+    });
+
+    if (memberIds.size === 0) return [];
+
+    const members = await User.find({ _id: { $in: Array.from(memberIds) } }).select(
+      'salesforceUserId'
+    );
+    return members.map((m) => m.salesforceUserId).filter(Boolean);
+  }
+
+  // Rep Performance within the connected org - scoped to a team via
+  // resolveTeamOwnerIds() above (manager: always their own; admin: a
+  // specific team if teamId is given, org-wide otherwise).
+  async getTeamPerformance(user, teamId) {
     try {
+      const ownerIds = await this.resolveTeamOwnerIds(user, teamId);
+
+      // null = no scoping (admin, org-wide). An empty array means "scoped,
+      // but nobody on the team has a connected Salesforce identity" - skip
+      // the query rather than send SOQL's invalid `IN ()`.
+      if (Array.isArray(ownerIds) && ownerIds.length === 0) {
+        return {};
+      }
+
       const salesforce = new SalesforceService(user);
 
-      const soql = `SELECT Id, Amount, StageName, OwnerId, Owner.Name
+      let soql = `SELECT Id, Amount, StageName, OwnerId, Owner.Name
                     FROM Opportunity`;
+
+      if (ownerIds) {
+        const idList = ownerIds.map((id) => `'${soqlEscape(id)}'`).join(',');
+        soql += ` WHERE OwnerId IN (${idList})`;
+      }
 
       const opportunities = await salesforce.queryAll(soql);
 

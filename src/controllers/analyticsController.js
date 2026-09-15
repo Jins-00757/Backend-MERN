@@ -102,9 +102,10 @@ export const getDealRisks = async (req, res) => {
 
 export const getTeamPerformance = async (req, res) => {
   try {
+    const { teamId } = req.query;
     const { data: performance, source } = await withCache(
-      `analytics_${req.user._id}_team-performance`,
-      () => AnalyticsService.getTeamPerformance(req.user)
+      `analytics_${req.user._id}_team-performance_${teamId || 'default'}`,
+      () => AnalyticsService.getTeamPerformance(req.user, teamId)
     );
 
     res.json({
@@ -146,7 +147,7 @@ const REPORT_FETCHERS = {
   health: (user, query) => AnalyticsService.getPipelineHealth(user, parseInt(query.range) || 30),
   forecast: (user) => AnalyticsService.getForecastByStage(user),
   risks: (user) => AnalyticsService.assessDealRisks(user),
-  'team-performance': (user) => AnalyticsService.getTeamPerformance(user),
+  'team-performance': (user, query) => AnalyticsService.getTeamPerformance(user, query.teamId),
   'revenue-trend': (user, query) => AnalyticsService.getRevenueTrend(user, parseInt(query.months) || 6),
 };
 

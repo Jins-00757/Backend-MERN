@@ -39,6 +39,7 @@ const toPublicProfile = (user) => ({
   company: user.company,
   jobTitle: user.jobTitle,
   department: user.department,
+  territory: user.territory,
   phoneNumber: user.phoneNumber,
   bio: user.bio,
   profilePicture: user.profilePicture,
@@ -69,7 +70,7 @@ const toPublicProfile = (user) => ({
  */
 export const signup = async (req, res, next) => {
   try {
-    const { name, email, password, confirmPassword } = req.body;
+    const { name, email, password, confirmPassword, jobTitle, territory } = req.body;
 
     // ========================================================================
     // VALIDATION
@@ -140,6 +141,12 @@ export const signup = async (req, res, next) => {
       password, // Will be hashed by pre-save middleware
       role: 'user',
       isEmailVerified: false,
+      // Optional profile metadata from the signup wizard's role/territory
+      // steps - display-only, never affects the RBAC `role` field above,
+      // which every signup gets regardless of what (if anything) was
+      // picked here.
+      ...(jobTitle ? { jobTitle: String(jobTitle).trim() } : {}),
+      ...(territory ? { territory: String(territory).trim() } : {}),
     });
 
     // Save user (pre-save middleware will hash password)

@@ -33,6 +33,11 @@ const userSchema = new mongoose.Schema(
     company: String,
     jobTitle: String,
     department: String,
+    // Sales region (North America / EMEA / APAC / LATAM / Other) - a
+    // curated dropdown on the signup wizard, but stored as a plain String
+    // here like every other descriptive profile field above, not an enum -
+    // consistent with how this schema already treats them.
+    territory: String,
     phoneNumber: String,
     bio: String,
     profilePicture: String,
