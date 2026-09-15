@@ -60,3 +60,27 @@ export const salesforceLimiter = rateLimit({
     });
   },
 });
+
+// Salesforce CRUD rate limiting (opportunities/accounts/contacts/bulk - see
+// salesforce.routes.js). A separate bucket from salesforceLimiter above
+// (different Redis key prefix) so interactive features that call this
+// router repeatedly in a short burst - e.g. dragging several deals across
+// Kanban board columns - don't get throttled by unrelated Analytics/Search
+// traffic sharing the same counter, and vice versa. The ceiling is higher
+// than salesforceLimiter's because a single legitimate drag-and-drop
+// session can easily fire more than 25 requests/minute, but it still caps
+// well below Salesforce's own per-org API limits, protecting against a
+// runaway client loop or bug from hammering the connected org.
+export const salesforceCrudLimiter = rateLimit({
+  store: makeStore('rate-limit-sf-crud:'),
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.user._id.toString(),
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many Salesforce requests - please slow down and try again shortly.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});

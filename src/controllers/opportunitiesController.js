@@ -287,7 +287,12 @@ export const updateOpportunity = async (req, res) => {
         ...updates,
         ...(stageChanged ? { previousStage: before.StageName } : {}),
       },
-      title: 'Opportunity updated',
+      // Match the title ActivityFeed.jsx derives for this same kind of
+      // entry when it re-fetches history from AuditLog (which has no title
+      // field of its own - see titleForLog() there) - otherwise a stage
+      // change shows the nicer "Stage changed: X -> Y" label only after a
+      // reload, and the plain generic one live over the WebSocket.
+      title: stageChanged ? `Stage changed: ${before.StageName} → ${updates.StageName}` : 'Opportunity updated',
       message: `${dealName} was updated`,
     });
 

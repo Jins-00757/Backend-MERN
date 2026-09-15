@@ -129,8 +129,10 @@ export const getSalesPipelineSummary = async (userId) => {
 
   const salesforce = new SalesforceService(user);
   
-  // Get opportunities grouped by stage
-  const soql = `SELECT StageName, COUNT() recordCount, SUM(Amount) totalAmount,
+  // Get opportunities grouped by stage. COUNT() (no argument) is the only
+  // SOQL aggregate that Salesforce refuses to let you alias - MALFORMED_QUERY
+  // ("unexpected token: 'COUNT()'") - so this counts Id instead, which can be.
+  const soql = `SELECT StageName, COUNT(Id) recordCount, SUM(Amount) totalAmount,
                        AVG(Probability) avgProbability
                 FROM Opportunity
                 WHERE IsClosed = false

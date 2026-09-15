@@ -1,6 +1,7 @@
 
 import express from 'express';
 import { protect } from '../middleware/auth.js';
+import { salesforceCrudLimiter } from '../middleware/rateLimiter.js';
 import * as opportunitiesCtrl from '../controllers/opportunitiesController.js';
 import * as accountsCtrl from '../controllers/accountsController.js';
 import * as contactsCtrl from '../controllers/contactsController.js';
@@ -8,8 +9,13 @@ import * as bulkCtrl from '../controllers/bulkOperationsController.js';
 
 const router = express.Router();
 
-// Protect all routes
+// Protect all routes and cap how fast one user can hit live Salesforce
+// through this router - previously unlimited, which any interactive
+// feature that fires several requests in a short window (e.g. dragging
+// deals across Kanban board stages) could otherwise abuse or accidentally
+// trip Salesforce's own org-level API limits.
 router.use(protect);
+router.use(salesforceCrudLimiter);
 
 // ========================================================================
 // OPPORTUNITIES ROUTES

@@ -116,7 +116,10 @@ class SalesforceService {
  * Get sales pipeline summary
  */
 async getSalesPipelineSummary() {
-  const soql = `SELECT StageName, COUNT() recordCount, SUM(Amount) totalAmount,
+  // COUNT() (no argument) is the only SOQL aggregate Salesforce refuses to
+  // let you alias (MALFORMED_QUERY: "unexpected token: 'COUNT()'") - see the
+  // identical query in data.controller.js for the same fix.
+  const soql = `SELECT StageName, COUNT(Id) recordCount, SUM(Amount) totalAmount,
                        AVG(Probability) avgProbability
                 FROM Opportunity
                 GROUP BY StageName
