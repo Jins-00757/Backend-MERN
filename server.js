@@ -1,7 +1,9 @@
 import app from './src/app.js';
 import { config } from './src/config/env.js';
 import { setupWebSocket } from './src/middleware/websocket.js';
-import { startScheduledJobs } from './src/services/schedulerService.js';
+import { startScheduledJobs, stopScheduledJobs } from './src/services/schedulerService.js';
+import { disconnectDB } from './src/config/db.js';
+import { redisClient } from './src/config/redisClient.js';
 
 // ============================================================================
 // Server Configuration
@@ -85,8 +87,31 @@ process.on('unhandledRejection', (reason, promise) => {
 const gracefulShutdown = (signal) => {
   console.log(`\n⚠️  ${signal} received, shutting down gracefully...`);
 
-  server.close(() => {
-    console.log('✓ Server closed');
+  // Stop scheduling new work before tearing down the connections that work
+  // depends on (the daily summary job sends email via MongoDB user records).
+  stopScheduledJobs();
+
+  server.close(async () => {
+    console.log('✓ HTTP server closed');
+
+    // Best-effort: a failure closing either connection shouldn't prevent
+    // the process from exiting - the OS will reclaim the sockets anyway,
+    // this is just to release them cleanly when possible.
+    try {
+      await disconnectDB();
+    } catch (error) {
+      console.error('Error closing MongoDB connection:', error.message);
+    }
+
+    try {
+      if (redisClient.isOpen) {
+        await redisClient.quit();
+        console.log('✓ Redis connection closed');
+      }
+    } catch (error) {
+      console.error('Error closing Redis connection:', error.message);
+    }
+
     process.exit(0);
   });
 
