@@ -13,7 +13,9 @@ const userSchema = new mongoose.Schema(
       unique: true,
       lowercase: true,
       match: [
-        /^[\w.+-]+@\w+([.-]?\w+)*(\.\w{2,3})+$/,
+        // Domain suffix is {2,} (not {2,3}) - a {2,3} cap wrongly rejects
+        // valid addresses on longer TLDs (.info, .technology, .london, ...).
+        /^[\w.+-]+@\w+([.-]?\w+)*(\.\w{2,})+$/,
         'Please provide a valid email address',
       ],
     },
@@ -43,6 +45,14 @@ const userSchema = new mongoose.Schema(
       select: false,
     },
     passwordResetExpiry: {
+      type: Date,
+      select: false,
+    },
+    emailVerificationToken: {
+      type: String,
+      select: false,
+    },
+    emailVerificationExpiry: {
       type: Date,
       select: false,
     },
@@ -118,6 +128,40 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    // Two-Factor Authentication (TOTP)
+    twoFactorEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    // Encrypted (encryptField/decryptField) - the confirmed, active secret.
+    twoFactorSecret: {
+      type: String,
+      select: false,
+    },
+    // Encrypted - set by POST /2fa/setup and only promoted to
+    // twoFactorSecret once POST /2fa/verify-setup proves the user actually
+    // has it loaded in an authenticator app. Never used for login.
+    twoFactorPendingSecret: {
+      type: String,
+      select: false,
+    },
+    // SHA-256 hashes only (never the raw code) - same hashing pattern as
+    // passwordResetToken/emailVerificationToken above.
+    backupCodes: {
+      type: [
+        {
+          codeHash: String,
+          usedAt: Date,
+        },
+      ],
+      select: false,
+      default: undefined,
+    },
+    lastTotpValidation: {
+      type: Date,
+      select: false,
+    },
   },
   {
     timestamps: true,
@@ -173,6 +217,9 @@ userSchema.methods.toJSON = function () {
   delete obj.password;
   delete obj.salesforceAccessToken;
   delete obj.salesforceRefreshToken;
+  delete obj.twoFactorSecret;
+  delete obj.twoFactorPendingSecret;
+  delete obj.backupCodes;
   return obj;
 };
 

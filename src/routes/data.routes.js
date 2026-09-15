@@ -1,5 +1,6 @@
 import express from 'express';
 import { protect } from '../middleware/auth.js';
+import { sensitiveOperationLimiter } from '../middleware/rateLimiter.js';
 import {
   getOpportunities,
   getAccounts,
@@ -29,8 +30,10 @@ router.get('/pipeline-summary', protect, getPipelineSummary);
 
 /**
  * GET /api/data/export/:format
- * Export Dashboard stats as CSV or PDF (format: csv | pdf)
+ * Generates a dashboard-stats export (CSV or PDF) and returns a secure,
+ * single-use, 1-hour download link rather than the file itself - see
+ * data.controller.js's exportDashboardStats and services/downloadTokenService.js.
  */
-router.get('/export/:format', protect, exportDashboardStats);
+router.get('/export/:format', protect, sensitiveOperationLimiter, exportDashboardStats);
 
 export default router;

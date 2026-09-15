@@ -1,9 +1,31 @@
 import crypto from 'crypto';
 import User from '../models/User.js';
-import { generateToken, setTokenCookie, clearTokenCookie } from '../services/tokenService.js';
-import { sendPasswordResetEmail } from '../services/emailService.js';
+import {
+  generateToken,
+  setTokenCookie,
+  clearTokenCookie,
+  generatePendingTwoFactorToken,
+  setPendingTwoFactorCookie,
+} from '../services/tokenService.js';
+import { sendPasswordResetEmail, sendVerificationEmail } from '../services/emailService.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { config } from '../config/env.js';
+
+/**
+ * Generate a random verification token, store its hash (never the raw
+ * token) with a 24-hour expiry on `user`, and save. Mirrors the
+ * forgot/reset-password token pattern below - the raw token is only ever
+ * held in memory long enough to build the verification email/URL, so a
+ * database leak alone can't be used to verify (or take over) an account.
+ * Caller must have `user` loaded and is responsible for sending the email.
+ */
+const issueEmailVerificationToken = async (user) => {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  user.emailVerificationToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+  user.emailVerificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+  await user.save({ validateModifiedOnly: true });
+  return rawToken;
+};
 
 /**
  * Shape a user document into the public profile sent to the client.
@@ -16,12 +38,17 @@ const toPublicProfile = (user) => ({
   role: user.role,
   company: user.company,
   jobTitle: user.jobTitle,
+  department: user.department,
   phoneNumber: user.phoneNumber,
+  bio: user.bio,
   profilePicture: user.profilePicture,
+  isEmailVerified: user.isEmailVerified,
+  twoFactorEnabled: user.twoFactorEnabled,
   preferences: user.preferences,
   salesforceUserId: user.salesforceUserId,
   salesforceOrgName: user.salesforceOrgName,
   isSalesforceConnected: user.isSalesforceConnected,
+  salesforceConnectedAt: user.salesforceConnectedAt,
   createdAt: user.createdAt,
   lastLogin: user.lastLoginAt,
 });
@@ -72,8 +99,11 @@ export const signup = async (req, res, next) => {
       });
     }
 
-    // Validate email format (basic check, detailed validation in schema)
-    const emailRegex = /^[\w.+-]+@\w+([.-]?\w+)*(\.\w{2,3})+$/;
+    // Validate email format (basic check, detailed validation in schema).
+    // Domain suffix is {2,} (not {2,3}) - matches the fix in User.js's
+    // schema-level validator, which previously rejected valid addresses on
+    // longer TLDs (.info, .technology, .london, ...).
+    const emailRegex = /^[\w.+-]+@\w+([.-]?\w+)*(\.\w{2,})+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({
         status: 'error',
@@ -116,6 +146,21 @@ export const signup = async (req, res, next) => {
     await user.save();
 
     console.log(`✅ New user registered: ${user.email}`);
+
+    // ========================================================================
+    // SEND VERIFICATION EMAIL (best-effort - a broken email config must
+    // never block account creation; the user can always ask for a resend
+    // later from their profile once email is fixed)
+    // ========================================================================
+
+    try {
+      const verifyToken = await issueEmailVerificationToken(user);
+      const verifyUrl = `${config.clientUrl}/verify-email?token=${verifyToken}`;
+      await sendVerificationEmail({ to: user.email, name: user.name, verifyUrl });
+      console.log(`✅ Verification email sent: ${user.email}`);
+    } catch (emailError) {
+      console.error(`❌ Failed to send verification email to ${user.email}:`, emailError.message);
+    }
 
     // ========================================================================
     // GENERATE TOKEN & SET COOKIE
@@ -218,6 +263,20 @@ export const login = async (req, res) => {
       });
     }
 
+    // 2FA-enabled accounts don't get a real session yet - a correct
+    // password alone only earns a short-lived "pending" cookie. The real
+    // session is issued by POST /api/auth/2fa/validate once the TOTP/backup
+    // code checks out (see twoFactor.controller.js).
+    if (user.twoFactorEnabled) {
+      const pendingToken = generatePendingTwoFactorToken(user._id);
+      setPendingTwoFactorCookie(res, pendingToken);
+
+      return res.status(200).json({
+        status: 'pending_2fa',
+        message: 'Enter your authenticator code to finish signing in',
+      });
+    }
+
     // Create JWT token and set the httpOnly cookie (shared with signup so
     // both flows produce an identical, consistently-configured cookie)
     const token = generateToken(user._id, user.email, user.role);
@@ -313,7 +372,7 @@ export const getMe = async (req, res, next) => {
  */
 export const updateProfile = async (req, res, next) => {
   try {
-    const { name, company, jobTitle, phoneNumber, bio, preferences } = req.body;
+    const { name, company, jobTitle, department, phoneNumber, bio, preferences } = req.body;
 
     // ========================================================================
     // VALIDATION
@@ -340,6 +399,7 @@ export const updateProfile = async (req, res, next) => {
     if (name) updateData.name = name.trim();
     if (company) updateData.company = company.trim();
     if (jobTitle) updateData.jobTitle = jobTitle.trim();
+    if (department) updateData.department = department.trim();
     if (phoneNumber) updateData.phoneNumber = phoneNumber.trim();
     if (bio) updateData.bio = bio.trim();
 
@@ -610,6 +670,110 @@ export const resetPassword = async (req, res, next) => {
 };
 
 // ============================================================================
+// VERIFY EMAIL - Confirm a user's email address via a mailed token
+// ============================================================================
+
+/**
+ * POST /api/auth/verify-email
+ * Body: { token }
+ * Public route - the token itself proves the request came from the mailed
+ * link, so this deliberately does not require an active session (the user
+ * may be opening the link in a different browser/device than they signed
+ * up in).
+ */
+export const verifyEmail = async (req, res, next) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return next(new AppError('Verification token is required', 400));
+    }
+
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    const user = await User.findOne({
+      emailVerificationToken: hashedToken,
+      emailVerificationExpiry: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      return next(
+        new AppError('Verification link is invalid or has expired. Please request a new one.', 400)
+      );
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpiry = undefined;
+    await user.save({ validateModifiedOnly: true });
+
+    console.log(`✅ Email verified: ${user.email}`);
+
+    res.status(200).json({
+      status: 'ok',
+      message: 'Email verified successfully.',
+      data: toPublicProfile(user),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================================================================
+// RESEND VERIFICATION EMAIL
+// ============================================================================
+
+/**
+ * POST /api/auth/verify-email/resend
+ * Protected route - re-issues a fresh token for the signed-in user and
+ * re-sends the verification email (e.g. after correcting a typo'd address,
+ * or because the original link expired).
+ */
+export const resendVerificationEmail = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return next(new AppError('User not found', 404));
+    }
+
+    if (user.isEmailVerified) {
+      return res.status(200).json({
+        status: 'ok',
+        message: 'This email address is already verified.',
+      });
+    }
+
+    const verifyToken = await issueEmailVerificationToken(user);
+    const verifyUrl = `${config.clientUrl}/verify-email?token=${verifyToken}`;
+
+    try {
+      await sendVerificationEmail({ to: user.email, name: user.name, verifyUrl });
+      console.log(`✅ Verification email resent: ${user.email}`);
+    } catch (emailError) {
+      // Same reasoning as forgotPassword - a token nobody can reach is
+      // worse than no token, so don't leave it dangling on failure.
+      user.emailVerificationToken = undefined;
+      user.emailVerificationExpiry = undefined;
+      await user.save({ validateModifiedOnly: true });
+
+      console.error(`❌ Failed to resend verification email to ${user.email}:`, emailError.message);
+
+      return next(
+        new AppError('Could not send verification email. Please try again shortly.', 500)
+      );
+    }
+
+    res.status(200).json({
+      status: 'ok',
+      message: 'Verification email sent. Please check your inbox.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
@@ -622,4 +786,6 @@ export default {
   changePassword,
   forgotPassword,
   resetPassword,
+  verifyEmail,
+  resendVerificationEmail,
 };

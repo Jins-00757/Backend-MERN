@@ -66,11 +66,25 @@ if (missingVars.length > 0) {
 // Optional but recommended
 const recommendedEnvVars = ['MONGODB_URI', 'ENCRYPTION_KEY'];
 const missingRecommended = recommendedEnvVars.filter((envVar) => !process.env[envVar]);
- 
+
 if (missingRecommended.length > 0) {
   console.warn(
     `⚠️  Warning: Missing recommended environment variables: ${missingRecommended.join(', ')}`
   );
+}
+
+// ENCRYPTION_KEY protects Salesforce OAuth tokens at rest (see
+// encryptionService.js) - unlike the other "recommended" vars above, a
+// missing or still-default value here isn't just a degraded feature, it
+// means every connected user's Salesforce org access is encrypted with a
+// key checked into source control (the fallback below), which anyone
+// reading this file could decrypt with. Hard-fail in production the same
+// way JWT_SECRET does; still just a loud warning in development so a fresh
+// clone without a .env can run at all.
+const DEFAULT_ENCRYPTION_KEY = 'your-32-char-encryption-key-here';
+if (config.nodeEnv === 'production' && (!process.env.ENCRYPTION_KEY || config.encryptionKey === DEFAULT_ENCRYPTION_KEY)) {
+  console.error('❌ Error: ENCRYPTION_KEY must be set to a real, unique secret in production (refusing to run with the default placeholder key)');
+  process.exit(1);
 }
  
 // MongoDB warning

@@ -11,6 +11,8 @@ import {
   changePassword,
   forgotPassword,
   resetPassword,
+  verifyEmail,
+  resendVerificationEmail,
 } from '../controllers/auth.controller.js';
 
 /**
@@ -63,6 +65,13 @@ router.post('/forgot-password', authLimiter, forgotPassword);
  */
 router.post('/reset-password', authLimiter, resetPassword);
 
+/**
+ * POST /api/auth/verify-email
+ * Confirm a user's email address using the token mailed to them
+ * Body: { token }
+ */
+router.post('/verify-email', authLimiter, verifyEmail);
+
 // ============================================================================
 // PROTECTED ROUTES (Authentication required)
 // ============================================================================
@@ -92,6 +101,12 @@ router.put('/profile', protect, updateProfile);
  * Body: { currentPassword, newPassword, confirmPassword }
  */
 router.post('/change-password', protect, changePassword);
+
+/**
+ * POST /api/auth/verify-email/resend
+ * Re-send the verification email to the signed-in user
+ */
+router.post('/verify-email/resend', authLimiter, protect, resendVerificationEmail);
 
 // NOTE: no catch-all route here - this router is mounted at '/api/auth' in
 // app.js alongside sibling routers ('/api/auth/salesforce'). A catch-all

@@ -37,6 +37,35 @@ const getOpportunitySnapshot = async (salesforce, id) => {
 };
 
 /**
+ * Record a failed notification-email delivery so it's never *only* a
+ * console.error the user has no way to see - a bad address, a full mailbox,
+ * or an SMTP outage previously vanished into the server log with no trace
+ * anywhere the user could find it (they'd only learn about it days later,
+ * indirectly, from an external bounce landing in their inbox). This gives
+ * every failure two visible homes: a persisted AuditLog entry (status:
+ * 'failure') and a live WebSocket push that shows up in the notification
+ * bell immediately, the same way opportunity.* events do.
+ */
+const reportEmailDeliveryFailure = (user, { event, resourceId, errorMessage }) => {
+  NotificationService.notify(user._id.toString(), 'notification.email_failed', {
+    title: 'Email notification failed to send',
+    message: `We couldn't email "${resourceId}" to ${user.email}. Check your email address in Profile Information.`,
+    resourceId,
+  });
+
+  AuditLogger.log('NOTIFY', {
+    userId: user._id,
+    resourceType: 'EmailNotification',
+    resourceId,
+    changes: { channel: 'email', event, to: user.email },
+    status: 'failure',
+    errorMessage,
+  }).catch((auditError) => {
+    console.error('Failed to record email delivery failure in audit log:', auditError.message);
+  });
+};
+
+/**
  * Send the "deal stage changed" notification email (see emailService.js).
  * Deliberately not awaited by callers - a slow or failing mailbox must
  * never delay or fail the opportunity update/close request that triggered
@@ -55,6 +84,11 @@ const notifyStageChange = (user, { dealName, oldStage, newStage, amount }) => {
     amount,
   }).catch((error) => {
     console.error('Failed to send deal stage change email:', error.message);
+    reportEmailDeliveryFailure(user, {
+      event: 'stage_change',
+      resourceId: dealName,
+      errorMessage: error.message,
+    });
   });
 };
 

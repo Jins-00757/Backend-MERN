@@ -4,6 +4,8 @@ import User from '../models/User.js';
 import { getSalesPipelineSummary } from '../controllers/data.controller.js';
 import { sendDailySummaryEmail } from './emailService.js';
 import { config } from '../config/env.js';
+import NotificationService from './NotificationService.js';
+import AuditLogger from './AuditLogger.js';
 
 /**
  * Same opt-out semantics as notifyStageChange() in opportunitiesController.js:
@@ -34,6 +36,28 @@ export const sendDailySummaries = async () => {
       sent += 1;
     } catch (error) {
       console.error(`Daily summary email failed for user ${user._id}:`, error.message);
+
+      // Same visibility gap as notifyStageChange() in opportunitiesController.js -
+      // a batch job failure here previously only ever reached the server
+      // log, never the user. Push it to their notification bell and persist
+      // it so a bad address (or any other delivery failure) doesn't just
+      // silently repeat every day at the next scheduled run.
+      NotificationService.notify(user._id.toString(), 'notification.email_failed', {
+        title: 'Daily summary email failed to send',
+        message: `We couldn't email your daily pipeline summary to ${user.email}. Check your email address in Profile Information.`,
+        resourceId: 'daily-summary',
+      });
+
+      AuditLogger.log('NOTIFY', {
+        userId: user._id,
+        resourceType: 'EmailNotification',
+        resourceId: 'daily-summary',
+        changes: { channel: 'email', event: 'daily_summary', to: user.email },
+        status: 'failure',
+        errorMessage: error.message,
+      }).catch((auditError) => {
+        console.error('Failed to record email delivery failure in audit log:', auditError.message);
+      });
     }
   }
 

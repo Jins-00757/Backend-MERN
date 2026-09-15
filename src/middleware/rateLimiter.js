@@ -84,3 +84,27 @@ export const salesforceCrudLimiter = rateLimit({
     });
   },
 });
+
+// Sensitive, high-impact operations rate limiting - creating a bulk
+// insert/update/upsert/delete job (which can touch thousands of Salesforce
+// records in one call, see bulkOperationsController.createBulkJob) and
+// generating a data-export download link (see downloadTokenService.js).
+// A deliberately low ceiling (5/hour, well under salesforceCrudLimiter's
+// 60/minute) separate from every other bucket above - these aren't
+// "interactive UI" traffic like dragging Kanban cards, they're the
+// operations with the largest blast radius in the app, so they get their
+// own tight cap regardless of how much of the general Salesforce quota a
+// user has left.
+export const sensitiveOperationLimiter = rateLimit({
+  store: makeStore('rate-limit-sensitive:'),
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  keyGenerator: (req) => req.user._id.toString(),
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many sensitive operations (bulk jobs / data exports) this hour - please try again later.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});

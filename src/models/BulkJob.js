@@ -61,6 +61,19 @@ const bulkJobSchema = new mongoose.Schema(
     duration: Number, // milliseconds
     startedAt: Date,
     completedAt: Date,
+
+    // Data integrity / file security (see csvUpload.js, uploadBulkDataFile)
+    sourceFileHash: String, // SHA-256 of the raw uploaded CSV bytes
+    sourceFileName: String, // original client-supplied filename, display only - never used as a path
+    sourceFileSize: Number, // bytes
+    invalidRecords: [
+      {
+        recordIndex: Number,
+        record: mongoose.Schema.Types.Mixed,
+        error: String,
+      },
+    ], // rows rejected by per-record validation before ever reaching Salesforce
+    createdIp: String,
   },
   {
     timestamps: true,

@@ -2,6 +2,22 @@ import User from '../models/User.js';
 import SalesforceService from '../services/salesforceService.js';
 import ExportService from '../services/ExportService.js';
 import AuditLogger from '../services/AuditLogger.js';
+import { createDownloadToken } from '../services/downloadTokenService.js';
+
+/**
+ * pdfkit's PDFDocument is a Readable stream, not a Buffer - the download-
+ * token flow needs the finished bytes up front (to hash and hand to
+ * createDownloadToken), so collect the stream into one Buffer instead of
+ * piping it straight to the response the way this used to work.
+ */
+const pdfDocToBuffer = (doc) =>
+  new Promise((resolve, reject) => {
+    const chunks = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc.end();
+  });
 
 /**
  * Classify a thrown error from the getSalesforce* / getSalesPipelineSummary
@@ -193,6 +209,14 @@ export const getSalesPipelineSummary = async (userId) => {
  * GET /api/data/export/:format
  * Export the Dashboard stats (pipeline summary by stage) as CSV or PDF.
  */
+/**
+ * Generates the export content and hands back a secure, single-use,
+ * 1-hour download link (see services/downloadTokenService.js) instead of
+ * streaming the file directly - the same content-freezing + hash
+ * verification + audit trail every export in this app now goes through,
+ * so a dashboard export is subject to the same guarantees as a bulk job's
+ * results export.
+ */
 export const exportDashboardStats = async (req, res) => {
   try {
     const { format } = req.params;
@@ -206,25 +230,45 @@ export const exportDashboardStats = async (req, res) => {
 
     const { data: stats } = await getSalesPipelineSummary(req.user._id);
 
+    let content;
+    let contentType;
+    const filename = `dashboard-stats.${format}`;
+
+    if (format === 'csv') {
+      content = await ExportService.exportDashboardStatsToCSV(stats);
+      contentType = 'text/csv';
+    } else {
+      const doc = await ExportService.exportDashboardStatsToPDF(stats, req.user);
+      content = await pdfDocToBuffer(doc);
+      contentType = 'application/pdf';
+    }
+
+    const { token, fileHash, expiresAt } = await createDownloadToken({
+      userId: req.user._id,
+      ip: req.ip,
+      filename,
+      contentType,
+      content,
+    });
+
     await AuditLogger.log('EXPORT', {
       userId: req.user._id,
       resourceType: 'DashboardStats',
+      resourceId: filename,
+      changes: { format, fileHash },
       ipAddress: req.ip,
       userAgent: req.get('user-agent'),
     });
 
-    if (format === 'csv') {
-      const csv = await ExportService.exportDashboardStatsToCSV(stats);
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="dashboard-stats.csv"');
-      res.send(csv);
-    } else {
-      const doc = await ExportService.exportDashboardStatsToPDF(stats, req.user);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename="dashboard-stats.pdf"');
-      doc.pipe(res);
-      doc.end();
-    }
+    res.status(200).json({
+      success: true,
+      data: {
+        downloadUrl: `/export/download/${token}`,
+        expiresAt,
+        fileHash,
+        filename,
+      },
+    });
   } catch (error) {
     console.error('Error exporting dashboard stats:', error);
     sendSalesforceDataError(res, error, 'Failed to export dashboard stats');

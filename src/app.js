@@ -9,12 +9,14 @@ import { connectDB } from './config/db.js';
 import { connectRedis } from './config/redisClient.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.routes.js';
+import twoFactorRoutes from './routes/twoFactor.routes.js';
 import salesforceAuthRoutes from './routes/salesforceAuth.routes.js';
 import salesforceRoutes from './routes/salesforce.routes.js';
 import dataRoutes from './routes/data.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
 import saasMetricsRoutes from './routes/saasMetrics.routes.js';
 import searchRoutes from './routes/search.routes.js';
+import exportRoutes from './routes/export.routes.js';
 
 // ============================================================================
 // Create Express App
@@ -119,6 +121,9 @@ connectDB().catch((error) => {
   // mount so its unmatched paths are never shadowed by auth.routes.js)
   app.use('/api/auth/salesforce', salesforceAuthRoutes);
 
+  // Two-factor auth routes - same reasoning as salesforceAuthRoutes above
+  app.use('/api/auth/2fa', twoFactorRoutes);
+
   // Auth routes
   app.use('/api/auth', authRoutes);
 
@@ -137,6 +142,9 @@ app.use('/api/data', dataRoutes);
 
   // Search & export routes
   app.use('/api/search', searchRoutes);
+
+  // Secure download-link redemption (see services/downloadTokenService.js)
+  app.use('/api/export', exportRoutes);
 
   // ========================================================================
   // 404 Handler

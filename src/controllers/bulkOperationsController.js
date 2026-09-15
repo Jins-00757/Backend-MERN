@@ -1,9 +1,15 @@
 
 
+import { readFile } from 'fs/promises';
 import { parse as parseCsv } from 'csv-parse/sync';
 import SalesforceService from '../services/salesforceService.js';
 import cacheService from '../services/CacheService.js';
 import BulkJob from '../models/BulkJob.js';
+import AuditLogger from '../services/AuditLogger.js';
+import { sha256Hex } from '../services/encryptionService.js';
+import { cleanupUpload } from '../middleware/csvUpload.js';
+import ExportService from '../services/ExportService.js';
+import { createDownloadToken } from '../services/downloadTokenService.js';
 
 /**
  * Bulk API 2.0's successfulResults/failedResults endpoints return a raw CSV
@@ -13,6 +19,61 @@ import BulkJob from '../models/BulkJob.js';
 const parseBulkResultsCsv = (csv) => {
   if (!csv || !csv.trim()) return [];
   return parseCsv(csv, { columns: true, skip_empty_lines: true });
+};
+
+// Mirrors the required-field rules already enforced by this app's own
+// single-record create endpoints (see createOpportunity/createAccount/
+// createContact) - a bulk `insert` is really N of those same creates, so it
+// should reject the same malformed records instead of forwarding them to
+// Salesforce's Bulk API and only finding out they failed minutes later.
+const REQUIRED_FIELDS_BY_OBJECT = {
+  Opportunity: ['Name', 'StageName', 'CloseDate', 'AccountId'],
+  Account: ['Name'],
+  Contact: ['LastName', 'AccountId'],
+  Task: ['Subject'],
+};
+
+const isBlank = (value) => value === undefined || value === null || String(value).trim() === '';
+
+/**
+ * Validate every record before it's ever sent to Salesforce, splitting the
+ * batch into what's safe to submit vs what should be rejected up front.
+ *  - insert: every field in REQUIRED_FIELDS_BY_OBJECT[objectType] must be
+ *    present and non-blank (same rule the single-record create endpoints use).
+ *  - update / delete: each record must carry an `Id` - there's no other way
+ *    to know which Salesforce record it refers to.
+ *  - upsert: Salesforce allows matching on Id OR an external ID field, which
+ *    this app has no way to know ahead of time, so only a basic "is this a
+ *    non-empty object" sanity check applies here - Salesforce itself is the
+ *    authority on whether the chosen match field is valid.
+ */
+const validateRecordsForImport = (objectType, operation, records) => {
+  const validRecords = [];
+  const invalidRecords = [];
+
+  records.forEach((record, recordIndex) => {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      invalidRecords.push({ recordIndex, record, error: 'Row is not a valid record object' });
+      return;
+    }
+
+    if (operation === 'insert') {
+      const missing = (REQUIRED_FIELDS_BY_OBJECT[objectType] || []).filter((field) => isBlank(record[field]));
+      if (missing.length > 0) {
+        invalidRecords.push({ recordIndex, record, error: `Missing required field(s): ${missing.join(', ')}` });
+        return;
+      }
+    } else if (operation === 'update' || operation === 'delete') {
+      if (isBlank(record.Id)) {
+        invalidRecords.push({ recordIndex, record, error: 'Missing required field: Id' });
+        return;
+      }
+    }
+
+    validRecords.push(record);
+  });
+
+  return { validRecords, invalidRecords };
 };
 
 /**
@@ -62,9 +123,19 @@ export const createBulkJob = async (req, res) => {
       status: 'queued',
       salesforceJobId: jobResponse.id,
       startedAt: new Date(),
+      createdIp: req.ip,
     });
 
     await bulkJob.save();
+
+    AuditLogger.log('CREATE', {
+      userId: req.user._id,
+      resourceType: 'BulkJob',
+      resourceId: jobId,
+      changes: { operation, objectType, salesforceJobId: jobResponse.id },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log bulk job creation:', err.message));
 
     res.status(201).json({
       success: true,
@@ -85,13 +156,71 @@ export const createBulkJob = async (req, res) => {
 };
 
 /**
+ * Shared core of both upload endpoints below (raw JSON array and CSV file):
+ * validate every record, submit only the valid ones to Salesforce, and
+ * persist the outcome - including the rejected rows - on the BulkJob so
+ * getBulkJobStatus/Results can report exactly what was and wasn't
+ * accepted. Throws (rather than writing a response itself) so each caller
+ * keeps control of its own success/error response shape and any
+ * source-specific fields (sourceFileHash etc).
+ */
+const submitValidatedRecords = async (req, bulkJob, records, sourceMeta = {}) => {
+  const { validRecords, invalidRecords } = validateRecordsForImport(
+    bulkJob.objectType,
+    bulkJob.operation,
+    records
+  );
+
+  if (validRecords.length === 0) {
+    const err = new Error('No valid records to upload - every row failed validation');
+    err.status = 400;
+    err.invalidRecords = invalidRecords;
+    throw err;
+  }
+
+  const salesforce = new SalesforceService(req.user);
+  const uploadResponse = await salesforce.uploadBulkData(bulkJob.salesforceJobId, validRecords);
+
+  bulkJob.status = 'in_progress';
+  bulkJob.totalRecords = validRecords.length;
+  bulkJob.jobData = validRecords.map((record, index) => ({
+    recordIndex: index,
+    record,
+    status: 'pending',
+  }));
+  bulkJob.invalidRecords = invalidRecords;
+  Object.assign(bulkJob, sourceMeta);
+
+  await bulkJob.save();
+  await cacheService.delete(`bulk_status_${req.user._id}_${bulkJob.jobId}`);
+
+  return { uploadResponse, validRecords, invalidRecords };
+};
+
+const loadQueuedBulkJob = async (jobId, userId) => {
+  const bulkJob = await BulkJob.findOne({ jobId, userId });
+  if (!bulkJob) {
+    const err = new Error('Bulk job not found');
+    err.status = 404;
+    throw err;
+  }
+  if (bulkJob.status !== 'queued') {
+    const err = new Error(`Cannot upload to job with status: ${bulkJob.status}`);
+    err.status = 400;
+    throw err;
+  }
+  return bulkJob;
+};
+
+/**
  * @route   POST /api/salesforce/bulk/:jobId/upload
- * @desc    Upload data to bulk job
+ * @desc    Upload data to bulk job as a raw JSON array
  * @access  Private
  */
 export const uploadBulkData = async (req, res) => {
+  const { jobId } = req.params;
+
   try {
-    const { jobId } = req.params;
     const records = req.body;
 
     if (!Array.isArray(records) || records.length === 0) {
@@ -101,58 +230,145 @@ export const uploadBulkData = async (req, res) => {
       });
     }
 
-    // Get bulk job from database
-    const bulkJob = await BulkJob.findOne({ jobId, userId: req.user._id });
+    const bulkJob = await loadQueuedBulkJob(jobId, req.user._id);
+    const { uploadResponse, validRecords, invalidRecords } = await submitValidatedRecords(req, bulkJob, records);
 
-    if (!bulkJob) {
-      return res.status(404).json({
-        success: false,
-        message: 'Bulk job not found',
-      });
-    }
-
-    if (bulkJob.status !== 'queued') {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot upload to job with status: ${bulkJob.status}`,
-      });
-    }
-
-    const salesforce = new SalesforceService(req.user);
-    const uploadResponse = await salesforce.uploadBulkData(
-      bulkJob.salesforceJobId,
-      records
-    );
-
-    // Update job record
-    bulkJob.status = 'in_progress';
-    bulkJob.totalRecords = records.length;
-    bulkJob.jobData = records.map((record, index) => ({
-      recordIndex: index,
-      record,
-      status: 'pending',
-    }));
-
-    await bulkJob.save();
-
-    // Invalidate cache
-    await cacheService.delete(`bulk_status_${req.user._id}_${jobId}`);
+    AuditLogger.log('IMPORT', {
+      userId: req.user._id,
+      resourceType: 'BulkJob',
+      resourceId: jobId,
+      changes: { recordsSubmitted: validRecords.length, recordsRejected: invalidRecords.length },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log bulk data upload:', err.message));
 
     res.status(200).json({
       success: true,
-      message: 'Data uploaded successfully',
+      message: invalidRecords.length > 0
+        ? `Data uploaded with ${invalidRecords.length} row(s) rejected by validation`
+        : 'Data uploaded successfully',
       data: {
         jobId,
-        recordsUploaded: records.length,
+        recordsUploaded: validRecords.length,
+        recordsRejected: invalidRecords.length,
+        invalidRecords,
         state: uploadResponse.state,
       },
     });
   } catch (error) {
     console.error('Error uploading bulk data:', error);
+    AuditLogger.log('IMPORT', {
+      userId: req.user._id,
+      resourceType: 'BulkJob',
+      resourceId: jobId,
+      status: 'failure',
+      errorMessage: error.message,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log bulk data upload failure:', err.message));
+
     res.status(error.status || 500).json({
       success: false,
       message: error.message,
+      invalidRecords: error.invalidRecords,
     });
+  }
+};
+
+/**
+ * @route   POST /api/salesforce/bulk/:jobId/upload-file
+ * @desc    Upload data to bulk job as an actual CSV file (multipart/form-data,
+ *          field name "file") - see middleware/csvUpload.js for the file-type
+ *          and 50MB size enforcement applied before this handler even runs.
+ * @access  Private
+ */
+export const uploadBulkDataFile = async (req, res) => {
+  const { jobId } = req.params;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'A CSV file is required (field name "file")',
+      });
+    }
+
+    const bulkJob = await loadQueuedBulkJob(jobId, req.user._id);
+
+    const fileBuffer = await readFile(req.file.path);
+    const sourceFileHash = sha256Hex(fileBuffer);
+
+    let records;
+    try {
+      records = parseCsv(fileBuffer.toString('utf8'), { columns: true, skip_empty_lines: true, trim: true });
+    } catch (parseError) {
+      const err = new Error(`Could not parse CSV file: ${parseError.message}`);
+      err.status = 400;
+      throw err;
+    }
+
+    if (!Array.isArray(records) || records.length === 0) {
+      const err = new Error('CSV file contains no data rows');
+      err.status = 400;
+      throw err;
+    }
+
+    const { uploadResponse, validRecords, invalidRecords } = await submitValidatedRecords(req, bulkJob, records, {
+      sourceFileHash,
+      sourceFileName: req.file.originalname,
+      sourceFileSize: req.file.size,
+    });
+
+    AuditLogger.log('IMPORT', {
+      userId: req.user._id,
+      resourceType: 'BulkJob',
+      resourceId: jobId,
+      changes: {
+        recordsSubmitted: validRecords.length,
+        recordsRejected: invalidRecords.length,
+        sourceFileHash,
+        sourceFileName: req.file.originalname,
+        sourceFileSize: req.file.size,
+      },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log bulk CSV upload:', err.message));
+
+    res.status(200).json({
+      success: true,
+      message: invalidRecords.length > 0
+        ? `File uploaded with ${invalidRecords.length} row(s) rejected by validation`
+        : 'File uploaded successfully',
+      data: {
+        jobId,
+        recordsUploaded: validRecords.length,
+        recordsRejected: invalidRecords.length,
+        invalidRecords,
+        sourceFileHash,
+        state: uploadResponse.state,
+      },
+    });
+  } catch (error) {
+    console.error('Error uploading bulk CSV file:', error);
+    AuditLogger.log('IMPORT', {
+      userId: req.user._id,
+      resourceType: 'BulkJob',
+      resourceId: jobId,
+      status: 'failure',
+      errorMessage: error.message,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log bulk CSV upload failure:', err.message));
+
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message,
+      invalidRecords: error.invalidRecords,
+    });
+  } finally {
+    // Always runs, success or failure - the temp file must never survive
+    // past this request (see csvUpload.js's per-request random directory).
+    await cleanupUpload(req);
   }
 };
 
@@ -418,6 +634,106 @@ export const getBulkJobFailedRecords = async (req, res) => {
 };
 
 /**
+ * Shared by the two download-link endpoints below: fetch the same
+ * successful/failed records the JSON endpoints already return, render them
+ * as CSV, and wrap that in a secure download token instead of returning the
+ * records inline - the same content-freezing/hash/expiry/single-use
+ * guarantees as the dashboard-stats export (see data.controller.js).
+ */
+const createRecordsDownloadLink = async (req, res, { records, filenamePrefix }) => {
+  const fields = records.length > 0 ? Object.keys(records[0]) : ['message'];
+  const rows = records.length > 0 ? records : [{ message: 'No records' }];
+  const csv = await ExportService.exportRowsToCSV(rows, fields);
+  const filename = `${filenamePrefix}-${req.params.jobId}.csv`;
+
+  const { token, fileHash, expiresAt } = await createDownloadToken({
+    userId: req.user._id,
+    ip: req.ip,
+    filename,
+    contentType: 'text/csv',
+    content: csv,
+  });
+
+  AuditLogger.log('EXPORT', {
+    userId: req.user._id,
+    resourceType: 'BulkJob',
+    resourceId: req.params.jobId,
+    changes: { filename, recordCount: records.length, fileHash },
+    ipAddress: req.ip,
+    userAgent: req.get('user-agent'),
+  }).catch((err) => console.error('Failed to audit-log bulk export link creation:', err.message));
+
+  res.status(200).json({
+    success: true,
+    data: { downloadUrl: `/export/download/${token}`, expiresAt, fileHash, filename },
+  });
+};
+
+/**
+ * @route   POST /api/salesforce/bulk/:jobId/results/download-link
+ * @desc    Get a secure, single-use download link for a completed job's
+ *          successful results as CSV
+ * @access  Private
+ */
+export const createResultsDownloadLink = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const bulkJob = await BulkJob.findOne({ jobId, userId: req.user._id });
+
+    if (!bulkJob) {
+      return res.status(404).json({ success: false, message: 'Bulk job not found' });
+    }
+    if (bulkJob.status !== 'completed') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot retrieve results for job with status: ${bulkJob.status}. Job must be completed first.`,
+      });
+    }
+
+    const salesforce = new SalesforceService(req.user);
+    const rawResults = await salesforce.getBulkJobResults(bulkJob.salesforceJobId);
+    const records = parseBulkResultsCsv(rawResults);
+
+    await createRecordsDownloadLink(req, res, { records, filenamePrefix: 'bulk-results' });
+  } catch (error) {
+    console.error('Error creating bulk results download link:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @route   POST /api/salesforce/bulk/:jobId/failed/download-link
+ * @desc    Get a secure, single-use download link for a completed job's
+ *          failed records as CSV
+ * @access  Private
+ */
+export const createFailedDownloadLink = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const bulkJob = await BulkJob.findOne({ jobId, userId: req.user._id });
+
+    if (!bulkJob) {
+      return res.status(404).json({ success: false, message: 'Bulk job not found' });
+    }
+    if (bulkJob.status !== 'completed') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot retrieve failed records for job with status: ${bulkJob.status}`,
+      });
+    }
+
+    const salesforce = new SalesforceService(req.user);
+    const rawFailedRecords = await salesforce.getBulkJobFailedRecords(bulkJob.salesforceJobId);
+    const records = parseBulkResultsCsv(rawFailedRecords);
+
+    await createRecordsDownloadLink(req, res, { records, filenamePrefix: 'bulk-failed' });
+  } catch (error) {
+    console.error('Error creating bulk failed-records download link:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * @route   GET /api/salesforce/bulk
  * @desc    Get all bulk jobs for user
  * @access  Private
@@ -459,9 +775,12 @@ export const getBulkJobs = async (req, res) => {
 export default {
   createBulkJob,
   uploadBulkData,
+  uploadBulkDataFile,
   closeBulkJob,
   getBulkJobStatus,
   getBulkJobResults,
   getBulkJobFailedRecords,
+  createResultsDownloadLink,
+  createFailedDownloadLink,
   getBulkJobs,
 };

@@ -55,3 +55,52 @@ export const verifyToken = (token) => {
     return null;
   }
 };
+
+// ============================================================================
+// Pending 2FA token/cookie - issued after a correct password for a
+// 2FA-enabled account, in place of the real session token. Its distinct
+// `purpose` claim means it can never be mistaken for (or reused as) a real
+// session token even if read by code that forgot to check the cookie name,
+// and its short expiry limits how long a stolen cookie is useful.
+// ============================================================================
+
+const PENDING_2FA_COOKIE = 'pending_2fa';
+const PENDING_2FA_EXPIRES_IN = '5m';
+const PENDING_2FA_MAX_AGE_MS = 5 * 60 * 1000;
+
+export const generatePendingTwoFactorToken = (userId) =>
+  jwt.sign({ _id: userId, purpose: '2fa_pending' }, config.jwtSecret, {
+    expiresIn: PENDING_2FA_EXPIRES_IN,
+  });
+
+export const verifyPendingTwoFactorToken = (token) => {
+  try {
+    const decoded = jwt.verify(token, config.jwtSecret);
+    return decoded?.purpose === '2fa_pending' ? decoded : null;
+  } catch (err) {
+    return null;
+  }
+};
+
+export const setPendingTwoFactorCookie = (res, token) => {
+  const isProduction = config.nodeEnv === 'production';
+
+  res.cookie(PENDING_2FA_COOKIE, token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'strict',
+    maxAge: PENDING_2FA_MAX_AGE_MS,
+    path: '/',
+  });
+};
+
+export const clearPendingTwoFactorCookie = (res) => {
+  res.clearCookie(PENDING_2FA_COOKIE, {
+    httpOnly: true,
+    secure: config.nodeEnv === 'production',
+    sameSite: 'strict',
+    path: '/',
+  });
+};
+
+export const getPendingTwoFactorCookieName = () => PENDING_2FA_COOKIE;

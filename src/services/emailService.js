@@ -93,6 +93,70 @@ export const sendPasswordResetEmail = async ({ to, name, resetUrl }) => {
   });
 };
 
+const verifyEmailTemplate = ({ name, verifyUrl }) => `
+<div style="background-color:#f4f5fa;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+    <tr>
+      <td style="padding:32px 32px 8px;text-align:center;">
+        <div style="display:inline-flex;align-items:center;gap:10px;">
+          <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#667eea,#764ba2);"></div>
+          <span style="font-size:18px;font-weight:700;color:#111827;">Sales Pipeline <span style="background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;background-clip:text;color:transparent;">Intelligence</span></span>
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <h1 style="font-size:20px;color:#111827;margin:0 0 12px;">Verify your email address</h1>
+        <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 24px;">
+          Hi ${name || 'there'}, confirm this is your email address to finish setting up your Sales Pipeline
+          Intelligence account. This link expires in 24 hours.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:0 32px;text-align:center;">
+        <a href="${verifyUrl}"
+           style="display:inline-block;padding:12px 28px;border-radius:9px;background:linear-gradient(135deg,#667eea,#764ba2);color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;">
+          Verify Email
+        </a>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px 32px 8px;">
+        <p style="font-size:12.5px;line-height:1.6;color:#9ca3af;margin:0;">
+          If the button above doesn't work, copy and paste this link into your browser:<br />
+          <a href="${verifyUrl}" style="color:#667eea;word-break:break-all;">${verifyUrl}</a>
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:16px 32px 32px;border-top:1px solid #f3f4f6;">
+        <p style="font-size:12.5px;line-height:1.6;color:#9ca3af;margin:16px 0 0;">
+          If you didn't create a Sales Pipeline Intelligence account, you can safely ignore this email.
+        </p>
+      </td>
+    </tr>
+  </table>
+</div>
+`;
+
+/**
+ * Send the "verify your email" link (sent on signup, and again whenever the
+ * user asks for a resend). Throws on failure like sendPasswordResetEmail -
+ * see auth.controller.js for how each caller handles that.
+ */
+export const sendVerificationEmail = async ({ to, name, verifyUrl }) => {
+  const mailer = getTransporter();
+
+  await mailer.sendMail({
+    from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
+    to,
+    subject: 'Verify your Sales Pipeline Intelligence email',
+    html: verifyEmailTemplate({ name, verifyUrl }),
+    text: `Hi ${name || 'there'},\n\nConfirm this is your email address to finish setting up your Sales Pipeline Intelligence account. This link expires in 24 hours:\n${verifyUrl}\n\nIf you didn't create this account, you can safely ignore this email.`,
+  });
+};
+
 const brandHeader = `
   <tr>
     <td style="padding:32px 32px 8px;text-align:center;">

@@ -15,6 +15,7 @@ const auditLogSchema = new mongoose.Schema(
         'LOGOUT',
         'EXPORT',
         'IMPORT',
+        'NOTIFY',
       ],
     },
     userId: {
