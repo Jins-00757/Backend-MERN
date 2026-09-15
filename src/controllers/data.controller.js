@@ -1,5 +1,7 @@
 import User from '../models/User.js';
 import SalesforceService from '../services/salesforceService.js';
+import ExportService from '../services/ExportService.js';
+import AuditLogger from '../services/AuditLogger.js';
 
 /**
  * Classify a thrown error from the getSalesforce* / getSalesPipelineSummary
@@ -185,4 +187,51 @@ export const getSalesPipelineSummary = async (userId) => {
   };
 };
 
-export default { getSalesforceOpportunities, getSalesforceAccounts, getSalesPipelineSummary };
+/**
+ * GET /api/data/export/:format
+ * Export the Dashboard stats (pipeline summary by stage) as CSV or PDF.
+ */
+export const exportDashboardStats = async (req, res) => {
+  try {
+    const { format } = req.params;
+
+    if (!['csv', 'pdf'].includes(format)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid export format',
+      });
+    }
+
+    const { data: stats } = await getSalesPipelineSummary(req.user._id);
+
+    await AuditLogger.log('EXPORT', {
+      userId: req.user._id,
+      resourceType: 'DashboardStats',
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    if (format === 'csv') {
+      const csv = await ExportService.exportDashboardStatsToCSV(stats);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="dashboard-stats.csv"');
+      res.send(csv);
+    } else {
+      const doc = await ExportService.exportDashboardStatsToPDF(stats, req.user);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="dashboard-stats.pdf"');
+      doc.pipe(res);
+      doc.end();
+    }
+  } catch (error) {
+    console.error('Error exporting dashboard stats:', error);
+    sendSalesforceDataError(res, error, 'Failed to export dashboard stats');
+  }
+};
+
+export default {
+  getSalesforceOpportunities,
+  getSalesforceAccounts,
+  getSalesPipelineSummary,
+  exportDashboardStats,
+};

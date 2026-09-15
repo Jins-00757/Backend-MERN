@@ -4,6 +4,7 @@ import {
   getOpportunities,
   getAccounts,
   getPipelineSummary,
+  exportDashboardStats,
 } from '../controllers/data.controller.js';
 
 const router = express.Router();
@@ -25,5 +26,11 @@ router.get('/accounts', protect, getAccounts);
  * Get sales pipeline summary by stage
  */
 router.get('/pipeline-summary', protect, getPipelineSummary);
+
+/**
+ * GET /api/data/export/:format
+ * Export Dashboard stats as CSV or PDF (format: csv | pdf)
+ */
+router.get('/export/:format', protect, exportDashboardStats);
 
 export default router;

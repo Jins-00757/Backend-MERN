@@ -12,16 +12,24 @@ const rolePermissions = {
   viewer: ['read:own'],
 };
 
+// Exported so call sites that need to branch on permission inline (e.g. a
+// single route handler serving several report types with different
+// requirements - see analyticsController.exportAnalytics) can reuse the same
+// rolePermissions table instead of duplicating it.
+export const hasPermission = (role, permission) => {
+  const userPermissions = rolePermissions[role] || [];
+  return userPermissions.includes(permission) || userPermissions.includes('*');
+};
+
 export const authorize = (requiredPermissions) => {
   return (req, res, next) => {
     const userRole = req.user?.role || 'viewer';
-    const userPermissions = rolePermissions[userRole] || [];
 
-    const hasPermission = requiredPermissions.some((permission) =>
-      userPermissions.includes(permission) || userPermissions.includes('*')
+    const allowed = requiredPermissions.some((permission) =>
+      hasPermission(userRole, permission)
     );
 
-    if (!hasPermission) {
+    if (!allowed) {
       return res.status(403).json({
         success: false,
         message: 'Insufficient permissions',

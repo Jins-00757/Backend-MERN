@@ -1,6 +1,7 @@
 import app from './src/app.js';
 import { config } from './src/config/env.js';
 import { setupWebSocket } from './src/middleware/websocket.js';
+import { startScheduledJobs } from './src/services/schedulerService.js';
 
 // ============================================================================
 // Server Configuration
@@ -40,6 +41,9 @@ const server = app.listen(PORT, HOST, () => {
 // Real-time notifications (see middleware/websocket.js) share this same
 // HTTP server/port rather than opening a second listener.
 setupWebSocket(server);
+
+// Daily summary email job (see services/schedulerService.js)
+startScheduledJobs();
 
 // ============================================================================
 // Error Handlers

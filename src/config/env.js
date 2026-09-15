@@ -34,6 +34,10 @@ export const config = {
   emailPassword: process.env.EMAIL_PASSWORD,
   emailFrom: process.env.EMAIL_FROM || process.env.EMAIL_USER,
 
+  // Scheduled jobs
+  dailySummaryCron: process.env.DAILY_SUMMARY_CRON || '0 8 * * *',
+  enableScheduledJobs: process.env.DISABLE_SCHEDULED_JOBS !== 'true',
+
   // Salesforce OAuth
   salesforceClientId: process.env.SALESFORCE_CLIENT_ID,
   salesforceClientSecret: process.env.SALESFORCE_CLIENT_SECRET,

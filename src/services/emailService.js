@@ -92,3 +92,141 @@ export const sendPasswordResetEmail = async ({ to, name, resetUrl }) => {
     text: `Hi ${name || 'there'},\n\nWe received a request to reset your Sales Pipeline Intelligence password. This link expires in 30 minutes:\n${resetUrl}\n\nIf you didn't request this, you can safely ignore this email.`,
   });
 };
+
+const brandHeader = `
+  <tr>
+    <td style="padding:32px 32px 8px;text-align:center;">
+      <div style="display:inline-flex;align-items:center;gap:10px;">
+        <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#667eea,#764ba2);"></div>
+        <span style="font-size:18px;font-weight:700;color:#111827;">Sales Pipeline <span style="background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;background-clip:text;color:transparent;">Intelligence</span></span>
+      </div>
+    </td>
+  </tr>
+`;
+
+const stageChangeTemplate = ({ name, dealName, oldStage, newStage, amount }) => `
+<div style="background-color:#f4f5fa;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+    ${brandHeader}
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <h1 style="font-size:20px;color:#111827;margin:0 0 12px;">Deal stage updated</h1>
+        <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 16px;">
+          Hi ${name || 'there'}, <strong>${dealName}</strong> moved from <strong>${oldStage}</strong> to <strong>${newStage}</strong>.
+        </p>
+        ${amount ? `<p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 8px;">Deal value: <strong>$${Number(amount).toLocaleString()}</strong></p>` : ''}
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:8px 32px 32px;">
+        <div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:14px;background:#f9fafb;border-radius:10px;">
+          <span style="font-size:13px;font-weight:600;color:#6b7280;">${oldStage}</span>
+          <span style="color:#9ca3af;">&rarr;</span>
+          <span style="font-size:13px;font-weight:700;color:#667eea;">${newStage}</span>
+        </div>
+      </td>
+    </tr>
+  </table>
+</div>
+`;
+
+/**
+ * Send a deal stage change notification. Fire-and-forget from the caller's
+ * perspective (opportunitiesController) - a failed notification email must
+ * never fail the opportunity update itself, so this still throws on failure
+ * like every other send* helper here, and the caller decides whether to
+ * await it or just log the rejection.
+ */
+export const sendDealStageChangeEmail = async ({ to, name, dealName, oldStage, newStage, amount }) => {
+  const mailer = getTransporter();
+
+  await mailer.sendMail({
+    from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
+    to,
+    subject: `${dealName}: ${oldStage} → ${newStage}`,
+    html: stageChangeTemplate({ name, dealName, oldStage, newStage, amount }),
+    text: `Hi ${name || 'there'},\n\n${dealName} moved from ${oldStage} to ${newStage}.${
+      amount ? ` Deal value: $${Number(amount).toLocaleString()}` : ''
+    }`,
+  });
+};
+
+const dailySummaryTemplate = ({ name, stats }) => {
+  const stageRows = (stats.stageBreakdown || [])
+    .map(
+      (s) => `
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;color:#374151;">${s.stage}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;color:#374151;text-align:right;">${s.count}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;color:#374151;text-align:right;">$${(s.totalAmount || 0).toLocaleString()}</td>
+        </tr>`
+    )
+    .join('');
+
+  return `
+<div style="background-color:#f4f5fa;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+    ${brandHeader}
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <h1 style="font-size:20px;color:#111827;margin:0 0 4px;">Your daily pipeline summary</h1>
+        <p style="font-size:13px;color:#9ca3af;margin:0 0 20px;">Hi ${name || 'there'} - here's where things stand today.</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:0 32px;">
+        <div style="display:flex;gap:12px;margin-bottom:20px;">
+          <div style="flex:1;background:#f0f9ff;border-radius:10px;padding:14px;text-align:center;">
+            <div style="font-size:11px;font-weight:700;color:#3b82f6;text-transform:uppercase;">Open Deals</div>
+            <div style="font-size:22px;font-weight:700;color:#111827;">${stats.totalOpportunities ?? 0}</div>
+          </div>
+          <div style="flex:1;background:#fef2f2;border-radius:10px;padding:14px;text-align:center;">
+            <div style="font-size:11px;font-weight:700;color:#ef4444;text-transform:uppercase;">Pipeline Value</div>
+            <div style="font-size:22px;font-weight:700;color:#111827;">$${(stats.totalPipelineValue || 0).toLocaleString()}</div>
+          </div>
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:0 32px 32px;">
+        <table role="presentation" width="100%" style="border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="padding:8px 12px;text-align:left;font-size:11px;color:#9ca3af;text-transform:uppercase;">Stage</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#9ca3af;text-transform:uppercase;">Deals</th>
+              <th style="padding:8px 12px;text-align:right;font-size:11px;color:#9ca3af;text-transform:uppercase;">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${stageRows || '<tr><td colspan="3" style="padding:12px;text-align:center;color:#9ca3af;font-size:13px;">No open opportunities</td></tr>'}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  </table>
+</div>
+`;
+};
+
+/**
+ * Send the daily pipeline summary. Same fire-and-forget contract as
+ * sendDealStageChangeEmail - see schedulerService.js, which sends these one
+ * user at a time and logs (rather than throws on) a per-user failure so one
+ * broken mailbox doesn't stop the rest of the batch.
+ */
+export const sendDailySummaryEmail = async ({ to, name, stats }) => {
+  const mailer = getTransporter();
+  const totalValue = (stats.totalPipelineValue || 0).toLocaleString();
+
+  await mailer.sendMail({
+    from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
+    to,
+    subject: `Daily Pipeline Summary: ${stats.totalOpportunities ?? 0} open deals, $${totalValue}`,
+    html: dailySummaryTemplate({ name, stats }),
+    text: `Hi ${name || 'there'},\n\nYour daily pipeline summary:\nOpen deals: ${stats.totalOpportunities ?? 0}\nPipeline value: $${totalValue}\n\n${(
+      stats.stageBreakdown || []
+    )
+      .map((s) => `${s.stage}: ${s.count} deals, $${(s.totalAmount || 0).toLocaleString()}`)
+      .join('\n')}`,
+  });
+};

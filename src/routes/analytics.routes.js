@@ -40,4 +40,13 @@ router.get(
   analyticsController.getRevenueTrend
 );
 
+// Export any of the reports above as CSV/PDF - team-performance additionally
+// requires manage:team, checked inside the controller since the report type
+// is a query param rather than the route itself.
+router.get(
+  '/export/:format',
+  authorize(['read:all']),
+  analyticsController.exportAnalytics
+);
+
 export default router;

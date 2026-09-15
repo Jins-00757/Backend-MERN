@@ -342,7 +342,22 @@ export const updateProfile = async (req, res, next) => {
     if (jobTitle) updateData.jobTitle = jobTitle.trim();
     if (phoneNumber) updateData.phoneNumber = phoneNumber.trim();
     if (bio) updateData.bio = bio.trim();
-    if (preferences) updateData.preferences = preferences;
+
+    // Merge rather than replace `preferences` wholesale - a caller updating
+    // just one setting (e.g. the notifications toggle in Navbar.jsx sending
+    // only { notifications: { email } }) must not blow away unrelated
+    // preferences like theme/timezone/dateFormat that it never mentioned.
+    if (preferences) {
+      const current = req.user.toObject().preferences || {};
+      updateData.preferences = {
+        ...current,
+        ...preferences,
+        notifications: {
+          ...current.notifications,
+          ...preferences.notifications,
+        },
+      };
+    }
 
     const user = await User.findByIdAndUpdate(
       req.user._id,

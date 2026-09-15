@@ -4,6 +4,82 @@ import SalesforceService, { soqlEscape } from '../services/salesforceService.js'
 import SyncLog from '../models/SyncLog.js';
 import cacheService from '../services/CacheService.js';
 import NotificationService from '../services/NotificationService.js';
+import AuditLogger from '../services/AuditLogger.js';
+import { sendDealStageChangeEmail } from '../services/emailService.js';
+
+/**
+ * Every cache namespace that depends on opportunity data - the single-record
+ * cache (only when `id` is known), the list cache, analytics reports (they
+ * aggregate opportunities), and search/suggestions results. Called after
+ * every create/update/close/delete so none of them ever serves stale data
+ * for longer than their own TTL would otherwise allow.
+ */
+const invalidateOpportunityCaches = async (userId, id) => {
+  const tasks = [
+    cacheService.deleteByPrefix(`opp_list_${userId}`),
+    cacheService.deleteByPrefix(`analytics_${userId}`),
+    cacheService.deleteByPrefix(`search_${userId}`),
+    cacheService.deleteByPrefix(`suggest_${userId}`),
+  ];
+  if (id) tasks.push(cacheService.delete(`opp_${userId}_${id}`));
+  await Promise.all(tasks);
+};
+
+/**
+ * Fetch just the fields needed to detect a stage change and label activity
+ * feed / notification entries with a human-readable deal name, without
+ * pulling the full Opportunity record.
+ */
+const getOpportunitySnapshot = async (salesforce, id) => {
+  const soql = `SELECT Id, Name, StageName, Amount FROM Opportunity WHERE Id = '${soqlEscape(id)}'`;
+  const result = await salesforce.query(soql);
+  return result.records[0] || null;
+};
+
+/**
+ * Send the "deal stage changed" notification email (see emailService.js).
+ * Deliberately not awaited by callers - a slow or failing mailbox must
+ * never delay or fail the opportunity update/close request that triggered
+ * it. Respects the user's notification preference, defaulting to enabled
+ * (opt-out) since most users expect stage-change alerts by default.
+ */
+const notifyStageChange = (user, { dealName, oldStage, newStage, amount }) => {
+  if (user.preferences?.notifications?.email === false) return;
+
+  sendDealStageChangeEmail({
+    to: user.email,
+    name: user.name,
+    dealName,
+    oldStage,
+    newStage,
+    amount,
+  }).catch((error) => {
+    console.error('Failed to send deal stage change email:', error.message);
+  });
+};
+
+/**
+ * Record an Opportunity change in the audit trail (backs the Deal Activity
+ * Feed - see AuditLogger.getAuditTrail / opportunitiesController.getActivityFeed)
+ * and broadcast it over the user's WebSocket connection for the live feed.
+ */
+const recordActivity = async (req, { action, eventType, resourceId, changes, title, message }) => {
+  NotificationService.notify(req.user._id.toString(), eventType, {
+    title,
+    message,
+    resourceId,
+    changes,
+  });
+
+  await AuditLogger.log(action, {
+    userId: req.user._id,
+    resourceType: 'Opportunity',
+    resourceId,
+    changes,
+    ipAddress: req.ip,
+    userAgent: req.get('user-agent'),
+  });
+};
 
 /**
  * @route   GET /api/salesforce/opportunities
@@ -137,9 +213,13 @@ export const createOpportunity = async (req, res) => {
     });
 
     // Invalidate cache
-    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await invalidateOpportunityCaches(req.user._id);
 
-    NotificationService.notify(req.user._id.toString(), 'opportunity.created', {
+    await recordActivity(req, {
+      action: 'CREATE',
+      eventType: 'opportunity.created',
+      resourceId: result.id,
+      changes: { dealName: Name, StageName, CloseDate, Amount: Amount ? parseFloat(Amount) : null, AccountId },
       title: 'Opportunity created',
       message: `${Name} was created`,
     });
@@ -181,16 +261,44 @@ export const updateOpportunity = async (req, res) => {
     }
 
     const salesforce = new SalesforceService(req.user);
+
+    // Snapshot the current record before updating - needed both to detect a
+    // stage change (triggers the notification email) and to label the
+    // activity feed entry with the deal's name even when `updates` doesn't
+    // include one.
+    const before = await getOpportunitySnapshot(salesforce, id);
+
     await salesforce.updateOpportunity(id, updates);
 
     // Invalidate cache
-    await cacheService.delete(`opp_${req.user._id}_${id}`);
-    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await invalidateOpportunityCaches(req.user._id, id);
 
-    NotificationService.notify(req.user._id.toString(), 'opportunity.updated', {
+    const dealName = updates.Name || before?.Name || id;
+    const stageChanged = Boolean(
+      before && updates.StageName && before.StageName !== updates.StageName
+    );
+
+    await recordActivity(req, {
+      action: 'UPDATE',
+      eventType: 'opportunity.updated',
+      resourceId: id,
+      changes: {
+        dealName,
+        ...updates,
+        ...(stageChanged ? { previousStage: before.StageName } : {}),
+      },
       title: 'Opportunity updated',
-      message: `${updates.Name || id} was updated`,
+      message: `${dealName} was updated`,
     });
+
+    if (stageChanged) {
+      notifyStageChange(req.user, {
+        dealName,
+        oldStage: before.StageName,
+        newStage: updates.StageName,
+        amount: updates.Amount ?? before.Amount,
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -216,15 +324,38 @@ export const closeOpportunity = async (req, res) => {
     const { won = true } = req.body;
 
     const salesforce = new SalesforceService(req.user);
+    const before = await getOpportunitySnapshot(salesforce, id);
+
     await salesforce.closeOpportunity(id, true, won);
 
-    await cacheService.delete(`opp_${req.user._id}_${id}`);
-    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await invalidateOpportunityCaches(req.user._id, id);
 
-    NotificationService.notify(req.user._id.toString(), 'opportunity.closed', {
+    const newStage = won ? 'Closed Won' : 'Closed Lost';
+    const dealName = before?.Name || id;
+
+    await recordActivity(req, {
+      action: 'UPDATE',
+      eventType: 'opportunity.closed',
+      resourceId: id,
+      changes: {
+        dealName,
+        previousStage: before?.StageName,
+        StageName: newStage,
+        IsClosed: true,
+        IsWon: won,
+      },
       title: `Opportunity closed as ${won ? 'Won' : 'Lost'}`,
-      message: `Opportunity ${id} was closed as ${won ? 'Won' : 'Lost'}`,
+      message: `${dealName} was closed as ${won ? 'Won' : 'Lost'}`,
     });
+
+    if (before && before.StageName !== newStage) {
+      notifyStageChange(req.user, {
+        dealName,
+        oldStage: before.StageName,
+        newStage,
+        amount: before.Amount,
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -249,10 +380,22 @@ export const deleteOpportunity = async (req, res) => {
     const { id } = req.params;
 
     const salesforce = new SalesforceService(req.user);
+    const before = await getOpportunitySnapshot(salesforce, id);
+
     await salesforce.deleteOpportunity(id);
 
-    await cacheService.delete(`opp_${req.user._id}_${id}`);
-    await cacheService.deleteByPrefix(`opp_list_${req.user._id}`);
+    await invalidateOpportunityCaches(req.user._id, id);
+
+    const dealName = before?.Name || id;
+
+    await recordActivity(req, {
+      action: 'DELETE',
+      eventType: 'opportunity.deleted',
+      resourceId: id,
+      changes: before ? { dealName, deletedRecord: before } : { dealName },
+      title: 'Opportunity deleted',
+      message: `${dealName} was deleted`,
+    });
 
     res.status(200).json({
       success: true,
@@ -292,6 +435,37 @@ export const getSyncStatus = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get sync status',
+    });
+  }
+};
+
+/**
+ * @route   GET /api/salesforce/opportunities/activity
+ * @desc    Deal Activity Feed - recent create/update/close/delete history
+ *          for the user's opportunities (backed by AuditLog). Real-time
+ *          updates arrive separately over WebSocket - see
+ *          middleware/websocket.js and the opportunity.* events emitted
+ *          above by recordActivity().
+ * @access  Private
+ */
+export const getActivityFeed = async (req, res) => {
+  try {
+    const { limit = 20, page = 1 } = req.query;
+
+    const trail = await AuditLogger.getAuditTrail(
+      { userId: req.user._id, resourceType: 'Opportunity' },
+      { page: parseInt(page), limit: Math.min(parseInt(limit), 100) }
+    );
+
+    res.status(200).json({
+      success: true,
+      ...trail,
+    });
+  } catch (error) {
+    console.error('Error fetching activity feed:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch activity feed',
     });
   }
 };

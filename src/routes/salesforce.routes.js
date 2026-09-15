@@ -16,6 +16,9 @@ router.use(protect);
 // ========================================================================
 
 router.get('/opportunities', opportunitiesCtrl.getOpportunities);
+// Must be registered before '/opportunities/:id' - otherwise Express would
+// match this path with id='activity' instead.
+router.get('/opportunities/activity', opportunitiesCtrl.getActivityFeed);
 router.get('/opportunities/:id', opportunitiesCtrl.getOpportunityById);
 router.post('/opportunities', opportunitiesCtrl.createOpportunity);
 router.patch('/opportunities/:id', opportunitiesCtrl.updateOpportunity);
