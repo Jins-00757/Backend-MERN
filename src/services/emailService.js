@@ -22,6 +22,15 @@ const getTransporter = () => {
         user: config.emailUser,
         pass: config.emailPassword,
       },
+      // nodemailer's defaults (2min connect / 10min socket) mean a genuinely
+      // unreachable/blocked SMTP host hangs the request far longer than any
+      // reasonable client timeout, which just looks like "timeout error"
+      // with no indication of why. Fail fast instead, so a real SMTP
+      // problem surfaces as its own clear error rather than being
+      // indistinguishable from ordinary slow-cold-start latency.
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000,
     });
   }
 
