@@ -108,3 +108,27 @@ export const sensitiveOperationLimiter = rateLimit({
     });
   },
 });
+
+// Outbound email sent to an address the user supplies (currently: emailing
+// a quote PDF - see quotesController.emailQuotePdf) - still needs its own
+// cap so the app can't be used to blast arbitrary mailboxes, but a sales rep
+// emailing several quotes to several prospects in one afternoon is normal,
+// everyday use, not a "largest blast radius in the app" action. Sharing
+// sensitiveOperationLimiter's 5/hour budget with bulk CSV jobs and full-org
+// exports meant a couple of ordinary quote emails could exhaust the same
+// counter a bulk export needs, and vice versa - two unrelated concerns (spam
+// prevention vs. large-blast-radius Salesforce writes) fighting over one
+// bucket. This is deliberately more generous and on its own counter.
+export const outboundEmailLimiter = rateLimit({
+  store: makeStore('rate-limit-email:'),
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20,
+  keyGenerator: (req) => req.user._id.toString(),
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many emails sent this hour - please try again later.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});

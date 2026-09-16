@@ -2,7 +2,7 @@
 import express from 'express';
 import { protect } from '../middleware/auth.js';
 import { authorize } from '../middleware/rbac.js';
-import { salesforceCrudLimiter, sensitiveOperationLimiter } from '../middleware/rateLimiter.js';
+import { salesforceCrudLimiter, sensitiveOperationLimiter, outboundEmailLimiter } from '../middleware/rateLimiter.js';
 import { csvUpload, handleCsvUploadError } from '../middleware/csvUpload.js';
 import * as opportunitiesCtrl from '../controllers/opportunitiesController.js';
 import * as accountsCtrl from '../controllers/accountsController.js';
@@ -140,10 +140,11 @@ router.patch('/quotes/:id', canWrite, quotesCtrl.updateQuote);
 router.delete('/quotes/:id', canDelete, quotesCtrl.deleteQuote);
 router.put('/quotes/:id/line-items', canWrite, quotesCtrl.saveQuoteLineItems);
 router.get('/quotes/:id/pdf', authorize(['read:all']), quotesCtrl.getQuotePdfLink);
-// Sends an outbound email to an address the user supplies - same
-// sensitiveOperationLimiter budget as other outbound/bulk actions above,
-// so it can't be used to blast the connected mailbox.
-router.post('/quotes/:id/email', canWrite, sensitiveOperationLimiter, quotesCtrl.emailQuotePdf);
+// Sends an outbound email to an address the user supplies - its own,
+// more generous cap (see outboundEmailLimiter) rather than sharing the
+// bulk-operations budget, since sending a few quote emails is normal
+// day-to-day use, not a large-blast-radius Salesforce write.
+router.post('/quotes/:id/email', canWrite, outboundEmailLimiter, quotesCtrl.emailQuotePdf);
 
 // ========================================================================
 // BULK OPERATIONS ROUTES - insert/update/upsert/delete against Salesforce
