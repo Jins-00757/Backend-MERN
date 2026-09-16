@@ -1,6 +1,28 @@
 
 import SalesforceService, { soqlEscape } from '../services/salesforceService.js';
 import cacheService from '../services/CacheService.js';
+import AuditLogger from '../services/AuditLogger.js';
+import NotificationService from '../services/NotificationService.js';
+
+// Same pattern as leadsController/contractsController/quotesController/
+// opportunitiesController's recordActivity - broadcasts a live WebSocket
+// event and persists it to AuditLog for the cross-entity activity feed
+// (see activityController.getActivity).
+const recordActivity = async (req, { action, eventType, resourceId, changes, title, message }) => {
+  NotificationService.notify(req.user._id.toString(), eventType, { title, message, resourceId, changes });
+
+  await AuditLogger.log(action, {
+    userId: req.user._id,
+    resourceType: 'Contact',
+    resourceId,
+    eventType,
+    title,
+    message,
+    changes,
+    ipAddress: req.ip,
+    userAgent: req.get('user-agent'),
+  }).catch((err) => console.error('Failed to audit-log contact activity:', err.message));
+};
 
 /**
  * @route   GET /api/salesforce/contacts
@@ -122,6 +144,16 @@ export const createContact = async (req, res) => {
     // Invalidate cache
     await cacheService.deleteByPrefix(`contacts_${req.user._id}`);
 
+    const contactName = [FirstName, LastName].filter(Boolean).join(' ');
+    await recordActivity(req, {
+      action: 'CREATE',
+      eventType: 'contact.created',
+      resourceId: result.id,
+      changes: { FirstName, LastName, AccountId },
+      title: 'Contact created',
+      message: `${contactName} was created`,
+    });
+
     res.status(201).json({
       success: true,
       message: 'Contact created successfully',
@@ -151,6 +183,16 @@ export const updateContact = async (req, res) => {
 
     // Invalidate cache
     await cacheService.delete(`contact_${req.user._id}_${id}`);
+
+    const contactName = [updates.FirstName, updates.LastName].filter(Boolean).join(' ');
+    await recordActivity(req, {
+      action: 'UPDATE',
+      eventType: 'contact.updated',
+      resourceId: id,
+      changes: updates,
+      title: 'Contact updated',
+      message: contactName || id,
+    });
 
     res.status(200).json({
       success: true,

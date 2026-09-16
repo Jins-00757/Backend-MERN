@@ -25,6 +25,16 @@ const auditLogSchema = new mongoose.Schema(
     },
     resourceType: String,
     resourceId: String,
+    // Domain-specific event key (e.g. 'lead.converted', 'opportunity.closed')
+    // and the same human-readable title/message NotificationService.notify()
+    // broadcasts live over WebSocket - persisting them here too means a
+    // historical entry (fetched later via getAuditTrail) and a live event
+    // render through the exact same code on the frontend, with no need to
+    // reconstruct "what happened" from `changes` after the fact. Optional/
+    // unindexed since older rows predate this and simply won't have them.
+    eventType: String,
+    title: String,
+    message: String,
     changes: mongoose.Schema.Types.Mixed,
     ipAddress: String,
     userAgent: String,

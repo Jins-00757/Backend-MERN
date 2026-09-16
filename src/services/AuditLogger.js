@@ -9,6 +9,9 @@ class AuditLogger {
         userId: details.userId,
         resourceType: details.resourceType,
         resourceId: details.resourceId,
+        eventType: details.eventType,
+        title: details.title,
+        message: details.message,
         changes: details.changes,
         ipAddress: details.ipAddress,
         userAgent: details.userAgent,
@@ -41,9 +44,14 @@ class AuditLogger {
 
       const query = {};
 
+      // resourceType/action may be a single value (existing callers) or an
+      // array (the cross-entity activity feed, which wants e.g. every CRM
+      // object type but only real data-changing actions - not LOGIN/EXPORT/
+      // NOTIFY noise) - $in degrades to an exact match for a single-element
+      // array, so this is purely additive.
       if (userId) query.userId = userId;
-      if (resourceType) query.resourceType = resourceType;
-      if (action) query.action = action;
+      if (resourceType) query.resourceType = Array.isArray(resourceType) ? { $in: resourceType } : resourceType;
+      if (action) query.action = Array.isArray(action) ? { $in: action } : action;
 
       if (startDate || endDate) {
         query.timestamp = {};

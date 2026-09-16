@@ -1,6 +1,28 @@
 
 import SalesforceService, { soqlEscape } from '../services/salesforceService.js';
 import cacheService from '../services/CacheService.js';
+import AuditLogger from '../services/AuditLogger.js';
+import NotificationService from '../services/NotificationService.js';
+
+// Same pattern as leadsController/contractsController/quotesController/
+// opportunitiesController's recordActivity - broadcasts a live WebSocket
+// event and persists it to AuditLog for the cross-entity activity feed
+// (see activityController.getActivity).
+const recordActivity = async (req, { action, eventType, resourceId, changes, title, message }) => {
+  NotificationService.notify(req.user._id.toString(), eventType, { title, message, resourceId, changes });
+
+  await AuditLogger.log(action, {
+    userId: req.user._id,
+    resourceType: 'Account',
+    resourceId,
+    eventType,
+    title,
+    message,
+    changes,
+    ipAddress: req.ip,
+    userAgent: req.get('user-agent'),
+  }).catch((err) => console.error('Failed to audit-log account activity:', err.message));
+};
 
 /**
  * @route   GET /api/salesforce/accounts
@@ -164,6 +186,15 @@ export const createAccount = async (req, res) => {
     // Invalidate cache
     await cacheService.deleteByPrefix(`accounts_${req.user._id}`);
 
+    await recordActivity(req, {
+      action: 'CREATE',
+      eventType: 'account.created',
+      resourceId: result.id,
+      changes: { Name, Industry },
+      title: 'Account created',
+      message: `${Name} was created`,
+    });
+
     res.status(201).json({
       success: true,
       message: 'Account created successfully',
@@ -199,6 +230,15 @@ export const updateAccount = async (req, res) => {
     await cacheService.delete(`account_${req.user._id}_${id}`);
     await cacheService.delete(`account_opps_${req.user._id}_${id}`);
     await cacheService.deleteByPrefix(`accounts_${req.user._id}`);
+
+    await recordActivity(req, {
+      action: 'UPDATE',
+      eventType: 'account.updated',
+      resourceId: id,
+      changes: updates,
+      title: 'Account updated',
+      message: updates.Name || id,
+    });
 
     res.status(200).json({
       success: true,

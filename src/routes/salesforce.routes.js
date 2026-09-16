@@ -12,6 +12,7 @@ import * as leadsCtrl from '../controllers/leadsController.js';
 import * as contractsCtrl from '../controllers/contractsController.js';
 import * as mapCtrl from '../controllers/mapController.js';
 import * as quotesCtrl from '../controllers/quotesController.js';
+import * as activityCtrl from '../controllers/activityController.js';
 
 const router = express.Router();
 
@@ -37,6 +38,14 @@ router.use(salesforceCrudLimiter);
 // ownership of records that live in the connected Salesforce org.
 const canWrite = authorize(['write:own', 'write:team', 'write:all']);
 const canDelete = authorize(['delete:all', 'manage:team']);
+
+// ========================================================================
+// ACTIVITY FEED - cross-entity, real-time-backing history read. Registered
+// ahead of the per-object routers below since it isn't scoped to any one
+// of them.
+// ========================================================================
+
+router.get('/activity', authorize(['read:all']), activityCtrl.getActivity);
 
 // ========================================================================
 // OPPORTUNITIES ROUTES
