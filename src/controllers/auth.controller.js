@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import User from '../models/User.js';
+import AuditLogger from '../services/AuditLogger.js';
 import {
   generateToken,
   setTokenCookie,
@@ -781,6 +782,70 @@ export const resendVerificationEmail = async (req, res, next) => {
 };
 
 // ============================================================================
+// DELETE ACCOUNT - Deactivate the signed-in user's own account
+// ============================================================================
+
+/**
+ * POST /api/auth/delete-account
+ * Deactivates the caller's own account (soft delete, via the existing
+ * `isInactive` flag - both `protect` and `login` already reject an
+ * inactive user, so this immediately and completely locks the account
+ * out). Never a hard delete: the record and everything that references it
+ * (AuditLog entries, Team.managerId/members, BulkJob history) stays
+ * intact, so nothing else in the app is left pointing at a row that no
+ * longer exists.
+ * Protected route - requires the current password, same confirmation
+ * changePassword above requires for its own account-level mutation.
+ */
+export const deleteAccount = async (req, res, next) => {
+  try {
+    const { password } = req.body;
+
+    if (!password) {
+      return next(
+        new AppError('Password is required to delete your account', 400)
+      );
+    }
+
+    const user = await User.findById(req.user._id).select('+password');
+
+    if (!user) {
+      return next(new AppError('User not found', 404));
+    }
+
+    const isPasswordValid = await user.comparePassword(password);
+
+    if (!isPasswordValid) {
+      return next(new AppError('Incorrect password', 401));
+    }
+
+    user.isInactive = true;
+    await user.save({ validateModifiedOnly: true });
+
+    clearTokenCookie(res);
+
+    AuditLogger.log('DELETE', {
+      userId: user._id,
+      resourceType: 'User',
+      resourceId: user._id,
+      changes: { isInactive: true },
+      status: 'success',
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('❌ Failed to audit-log account deletion:', err.message));
+
+    console.log(`✅ Account deactivated: ${user.email}`);
+
+    res.status(200).json({
+      status: 'ok',
+      message: 'Your account has been deactivated.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
@@ -795,4 +860,5 @@ export default {
   resetPassword,
   verifyEmail,
   resendVerificationEmail,
+  deleteAccount,
 };

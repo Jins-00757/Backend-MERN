@@ -13,6 +13,7 @@ import {
   resetPassword,
   verifyEmail,
   resendVerificationEmail,
+  deleteAccount,
 } from '../controllers/auth.controller.js';
 
 /**
@@ -107,6 +108,15 @@ router.post('/change-password', protect, changePassword);
  * Re-send the verification email to the signed-in user
  */
 router.post('/verify-email/resend', authLimiter, protect, resendVerificationEmail);
+
+/**
+ * POST /api/auth/delete-account
+ * Deactivate the signed-in user's own account (soft delete via
+ * isInactive - see auth.controller.js for why this is never a hard
+ * delete)
+ * Body: { password }
+ */
+router.post('/delete-account', protect, deleteAccount);
 
 // NOTE: no catch-all route here - this router is mounted at '/api/auth' in
 // app.js alongside sibling routers ('/api/auth/salesforce'). A catch-all
