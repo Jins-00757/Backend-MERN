@@ -23,24 +23,35 @@ export const generateToken = (userId, email, role) => {
  */
 export const setTokenCookie = (res, token) => {
   const isProduction = config.nodeEnv === 'production';
- 
+
   res.cookie('token', token, {
     httpOnly: true, // Prevents JavaScript from accessing the cookie
     secure: isProduction, // HTTPS only in production
-    sameSite: 'strict', // CSRF protection
+    // BUG FIX: 'strict' never sends the cookie on a cross-site request at
+    // all - fine when frontend and backend share a site (e.g. both on
+    // localhost, same registrable domain in different dev setups), but this
+    // app is deployed as two separate origins (a Render static site + a
+    // Render web service), which is genuinely cross-site. Every API call
+    // was silently sent with no cookie, so every request looked
+    // unauthenticated ("No token provided") despite a real, valid session
+    // existing. 'None' requires `secure: true` (browsers reject it
+    // otherwise), which is exactly what production already sets above.
+    sameSite: isProduction ? 'none' : 'strict', // CSRF protection (relaxed only for the cross-site production deployment)
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     path: '/',
   });
 };
- 
+
 /**
  * Clear token cookie
  */
 export const clearTokenCookie = (res) => {
+  const isProduction = config.nodeEnv === 'production';
+
   res.clearCookie('token', {
     httpOnly: true,
-    secure: config.nodeEnv === 'production',
-    sameSite: 'strict',
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'strict',
     path: '/',
   });
 };
@@ -88,17 +99,21 @@ export const setPendingTwoFactorCookie = (res, token) => {
   res.cookie(PENDING_2FA_COOKIE, token, {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'strict',
+    // Same cross-site reasoning as setTokenCookie above - this cookie is
+    // read back by a request from the (separately-hosted) frontend too.
+    sameSite: isProduction ? 'none' : 'strict',
     maxAge: PENDING_2FA_MAX_AGE_MS,
     path: '/',
   });
 };
 
 export const clearPendingTwoFactorCookie = (res) => {
+  const isProduction = config.nodeEnv === 'production';
+
   res.clearCookie(PENDING_2FA_COOKIE, {
     httpOnly: true,
-    secure: config.nodeEnv === 'production',
-    sameSite: 'strict',
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'strict',
     path: '/',
   });
 };
