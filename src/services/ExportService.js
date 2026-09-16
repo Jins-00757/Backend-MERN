@@ -2,6 +2,7 @@
 import { Parser } from '@json2csv/plainjs';
 import PDFDocument from 'pdfkit';
 import { calculateLineTotal, calculateQuoteTotals } from '../utils/quoteCalculations.js';
+import { sanitizeCsvRows } from '../utils/csvSafe.js';
 
 const money = (n) => `$${(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -33,7 +34,7 @@ class ExportService {
   async exportRowsToCSV(rows, fields) {
     try {
       const parser = new Parser({ fields });
-      return parser.parse(rows);
+      return parser.parse(sanitizeCsvRows(rows));
     } catch (error) {
       throw new Error(`CSV export failed: ${error.message}`);
     }

@@ -1,5 +1,5 @@
 
-import SalesforceService, { soqlEscape } from './salesforceService.js';
+import SalesforceService, { soqlEscape, isPlainDate } from './salesforceService.js';
 
 /**
  * Re-throw with a friendlier message while preserving the original error's
@@ -9,6 +9,20 @@ const wrapError = (error, prefix) => {
   const wrapped = new Error(`${prefix}: ${error.message}`);
   wrapped.status = error.status;
   return wrapped;
+};
+
+/**
+ * CloseDate is a SOQL date literal, which takes no quotes at all - unlike
+ * soqlEscape() (for *string* literals), only a value that provably matches
+ * `YYYY-MM-DD` (as produced by the filter UI's `<input type="date">`) is
+ * safe to splice into the WHERE clause unescaped.
+ */
+const assertPlainDate = (value, field) => {
+  if (!isPlainDate(value)) {
+    const err = new Error(`${field} must be a YYYY-MM-DD date`);
+    err.status = 400;
+    throw err;
+  }
 };
 
 const SORTABLE_FIELDS = {
@@ -48,8 +62,14 @@ class SearchService {
       if (stage) whereClauses.push(`StageName = '${soqlEscape(stage)}'`);
       if (minAmount) whereClauses.push(`Amount >= ${parseFloat(minAmount)}`);
       if (maxAmount) whereClauses.push(`Amount <= ${parseFloat(maxAmount)}`);
-      if (startDate) whereClauses.push(`CloseDate >= ${soqlEscape(startDate)}`);
-      if (endDate) whereClauses.push(`CloseDate <= ${soqlEscape(endDate)}`);
+      if (startDate) {
+        assertPlainDate(startDate, 'startDate');
+        whereClauses.push(`CloseDate >= ${startDate}`);
+      }
+      if (endDate) {
+        assertPlainDate(endDate, 'endDate');
+        whereClauses.push(`CloseDate <= ${endDate}`);
+      }
 
       const whereSql = whereClauses.length > 0 ? ` WHERE ${whereClauses.join(' AND ')}` : '';
       const orderSql = SORTABLE_FIELDS[sortBy] || SORTABLE_FIELDS.relevance;

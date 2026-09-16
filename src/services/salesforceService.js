@@ -40,7 +40,7 @@ export const soqlEscape = (value) =>
  * the right defense here - only a value that provably matches this exact
  * shape is safe to splice in unescaped.
  */
-const isPlainDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+export const isPlainDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 
 /**
  * Field lists for the Bulk Operations page's "Export Data" tab - one curated,
