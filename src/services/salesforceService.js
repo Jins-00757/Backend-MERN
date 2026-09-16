@@ -33,6 +33,55 @@ export const soqlEscape = (value) =>
   String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 /**
+ * A plain `YYYY-MM-DD` date, as produced by an HTML `<input type="date">` -
+ * used to validate exportObjectRecords()'s dateFrom/dateTo filters below
+ * before they're interpolated into SOQL. Unlike soqlEscape() (for *string*
+ * literals), a SOQL date literal takes no quotes at all, so escaping isn't
+ * the right defense here - only a value that provably matches this exact
+ * shape is safe to splice in unescaped.
+ */
+const isPlainDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+/**
+ * Field lists for the Bulk Operations page's "Export Data" tab - one curated,
+ * hardcoded SELECT per object rather than accepting field names from the
+ * client, which would otherwise be the one place in this service where a
+ * SOQL field/object name comes from user input instead of a fixed string
+ * this codebase wrote. `searchField` is optional and used for the export
+ * form's free-text search box.
+ */
+export const EXPORT_OBJECT_CONFIG = {
+  Account: {
+    fields: ['Id', 'Name', 'BillingStreet', 'BillingCity', 'BillingState', 'BillingPostalCode', 'BillingCountry', 'Industry', 'AnnualRevenue', 'Phone', 'Website', 'CreatedDate', 'LastModifiedDate'],
+    searchField: 'Name',
+  },
+  Contact: {
+    fields: ['Id', 'FirstName', 'LastName', 'Email', 'Phone', 'Title', 'Department', 'AccountId', 'CreatedDate', 'LastModifiedDate'],
+    searchField: 'LastName',
+  },
+  Lead: {
+    fields: ['Id', 'FirstName', 'LastName', 'Company', 'Title', 'Email', 'Phone', 'Status', 'Rating', 'LeadSource', 'Industry', 'AnnualRevenue', 'IsConverted', 'CreatedDate', 'LastModifiedDate'],
+    searchField: 'Company',
+  },
+  Opportunity: {
+    fields: ['Id', 'Name', 'StageName', 'Amount', 'CloseDate', 'Probability', 'AccountId', 'OwnerId', 'CreatedDate', 'LastModifiedDate'],
+    searchField: 'Name',
+  },
+  Contract: {
+    fields: ['Id', 'ContractNumber', 'AccountId', 'Status', 'StartDate', 'EndDate', 'ContractTerm', 'CreatedDate', 'LastModifiedDate'],
+    searchField: null,
+  },
+  Quote: {
+    fields: ['Id', 'Name', 'QuoteNumber', 'OpportunityId', 'Status', 'ExpirationDate', 'Subtotal', 'Discount', 'Tax', 'ShippingHandling', 'GrandTotal', 'CreatedDate', 'LastModifiedDate'],
+    searchField: 'Name',
+  },
+  Task: {
+    fields: ['Id', 'Subject', 'Status', 'Priority', 'ActivityDate', 'WhatId', 'WhoId', 'OwnerId', 'CreatedDate', 'LastModifiedDate'],
+    searchField: 'Subject',
+  },
+};
+
+/**
  * SalesforceService - Handles all Salesforce API interactions
  * Implements retry logic, token refresh, and error handling
  */
@@ -281,7 +330,43 @@ async getSalesPipelineSummary() {
    */
   handleError(error) {
     const status = error.response?.status;
-    const message = error.response?.data?.[0]?.message || error.message;
+    const salesforceErrors = error.response?.data;
+    const message = salesforceErrors?.[0]?.message || error.message;
+    const errorCode = salesforceErrors?.[0]?.errorCode;
+
+    // The errorMap below intentionally replaces Salesforce's own error text
+    // with a generic, user-safe message (never leak raw SOQL/schema detail
+    // to the client) - but that means the *real* reason is otherwise lost
+    // entirely. Log it here, once, in the one place every Salesforce API
+    // error already passes through, so it's still visible server-side.
+    if (status) {
+      console.error(`Salesforce API error (${status}) at ${error.config?.method?.toUpperCase()} ${error.config?.url}:`, JSON.stringify(salesforceErrors));
+    }
+
+    // Quotes and Products/Price Books are disabled by default in many
+    // Salesforce orgs (confirmed empirically: describe() on a not-enabled
+    // Quote object 404s with NOT_FOUND, and a SOQL query against it 400s
+    // with INVALID_TYPE) - callers otherwise only ever see a bare "Resource
+    // not found"/"Invalid request" with no hint what to actually do about
+    // it. Special-case exactly these two error codes against exactly the
+    // quote/product-catalog objects this feature added, so everything else
+    // (a genuine validation error once the feature *is* enabled, or any
+    // other object's 404/400) still gets the normal generic message below.
+    if (['NOT_FOUND', 'INVALID_TYPE'].includes(errorCode)) {
+      const decodedUrl = decodeURIComponent(error.config?.url || '');
+      const featureGatedObjects = ['QuoteLineItem', 'Quote', 'PricebookEntry', 'Pricebook2', 'Product2'];
+      const mentionsFeatureGatedObject = featureGatedObjects.some(
+        (obj) => decodedUrl.includes(`/sobjects/${obj}`) || new RegExp(`FROM\\s+${obj}\\b`, 'i').test(decodedUrl)
+      );
+
+      if (mentionsFeatureGatedObject) {
+        const err = new Error(
+          'Quotes, Products, or Price Books are not enabled in this Salesforce org yet. In Salesforce Setup, search for "Quote Settings" and turn quotes on, and confirm Products & Price Books are active with at least one active product on the Standard Price Book, then try again.'
+        );
+        err.status = 400;
+        return err;
+      }
+    }
 
     const errorMap = {
       400: 'Invalid request',
@@ -358,10 +443,11 @@ async getSalesPipelineSummary() {
       amountMin,
       amountMax,
       accountId,
+      searchTerm,
     } = filters;
 
     let soql = `SELECT Id, Name, StageName, Amount, CloseDate,
-                       Probability, AccountId, OwnerId, Owner.Name, CreatedDate,
+                       Probability, AccountId, Account.Name, OwnerId, Owner.Name, CreatedDate,
                        LastModifiedDate FROM Opportunity`;
 
     const whereClauses = [];
@@ -380,6 +466,10 @@ async getSalesPipelineSummary() {
 
     if (accountId) {
       whereClauses.push(`AccountId = '${soqlEscape(accountId)}'`);
+    }
+
+    if (searchTerm) {
+      whereClauses.push(`Name LIKE '%${soqlEscape(searchTerm)}%'`);
     }
 
     if (whereClauses.length > 0) {
@@ -839,6 +929,289 @@ async getSalesPipelineSummary() {
 
   async updateContract(contractId, updates) {
     return this.request('PATCH', `/sobjects/Contract/${contractId}`, updates);
+  }
+
+  // ========================================================================
+  // QUOTES & PRODUCT CATALOG
+  // ========================================================================
+
+  /**
+   * The org's active Standard Price Book Id. Every Quote line item is
+   * priced off a PricebookEntry, and a PricebookEntry only exists against a
+   * specific Pricebook2 - when an Opportunity has no Pricebook2Id of its own
+   * (common until someone explicitly sets one), this is the fallback so a
+   * quote can still be built. Cached on the instance since it never changes
+   * within one request lifecycle and this is looked up on nearly every
+   * quote/product call.
+   */
+  async getStandardPricebookId() {
+    if (this._standardPricebookId) return this._standardPricebookId;
+
+    const result = await this.query(
+      `SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1`
+    );
+
+    if (result.records.length === 0) {
+      const err = new Error(
+        'No standard price book is active in this Salesforce org - enable Products/Price Books in Setup before creating quotes'
+      );
+      err.status = 400;
+      throw err;
+    }
+
+    this._standardPricebookId = result.records[0].Id;
+    return this._standardPricebookId;
+  }
+
+  /**
+   * Which Pricebook2 a new Quote for this Opportunity should use: the
+   * Opportunity's own Pricebook2Id when it has one (so line items stay
+   * consistent with whatever the deal was already priced against), falling
+   * back to the org's standard price book otherwise.
+   */
+  async resolveQuotePricebookId(opportunityId) {
+    const result = await this.query(
+      `SELECT Pricebook2Id FROM Opportunity WHERE Id = '${soqlEscape(opportunityId)}'`
+    );
+
+    if (result.records.length === 0) {
+      const err = new Error('Opportunity not found');
+      err.status = 404;
+      throw err;
+    }
+
+    return result.records[0].Pricebook2Id || (await this.getStandardPricebookId());
+  }
+
+  /**
+   * Active products available to add to a quote, priced against the given
+   * price book - the picker the line item engine searches against. Joins
+   * PricebookEntry -> Product2 so the result carries both the sellable
+   * entry (what a QuoteLineItem actually references) and the product's
+   * display name/code in one query.
+   */
+  async getProductCatalog(filters = {}) {
+    const { pricebookId, searchTerm, limit = 50, offset = 0 } = filters;
+
+    if (!pricebookId) {
+      throw new Error('pricebookId is required to browse the product catalog');
+    }
+
+    let soql = `SELECT Id, UnitPrice, Product2Id, Product2.Name, Product2.ProductCode,
+                       Product2.Description, Product2.IsActive
+                FROM PricebookEntry
+                WHERE Pricebook2Id = '${soqlEscape(pricebookId)}' AND IsActive = true
+                      AND Product2.IsActive = true`;
+
+    if (searchTerm) {
+      soql += ` AND (Product2.Name LIKE '%${soqlEscape(searchTerm)}%' OR Product2.ProductCode LIKE '%${soqlEscape(searchTerm)}%')`;
+    }
+
+    soql += ` ORDER BY Product2.Name ASC LIMIT ${limit} OFFSET ${offset}`;
+
+    const result = await this.query(soql);
+
+    return result.records.map((entry) => ({
+      pricebookEntryId: entry.Id,
+      productId: entry.Product2Id,
+      name: entry.Product2.Name,
+      productCode: entry.Product2.ProductCode,
+      description: entry.Product2.Description,
+      listPrice: entry.UnitPrice,
+    }));
+  }
+
+  /**
+   * List quotes, optionally filtered by opportunity/account/status/name.
+   */
+  async getQuotes(filters = {}) {
+    const { limit = 50, offset = 0, opportunityId, accountId, status, searchTerm } = filters;
+
+    let soql = `SELECT Id, Name, QuoteNumber, OpportunityId, Opportunity.Name,
+                       Opportunity.AccountId, Opportunity.Account.Name, Status,
+                       ExpirationDate, Discount, Tax, ShippingHandling, Subtotal,
+                       GrandTotal, Pricebook2Id, Description, OwnerId, Owner.Name,
+                       CreatedDate, LastModifiedDate
+                FROM Quote`;
+
+    const whereClauses = [];
+    if (opportunityId) whereClauses.push(`OpportunityId = '${soqlEscape(opportunityId)}'`);
+    if (accountId) whereClauses.push(`Opportunity.AccountId = '${soqlEscape(accountId)}'`);
+    if (status) whereClauses.push(`Status = '${soqlEscape(status)}'`);
+    if (searchTerm) whereClauses.push(`Name LIKE '%${soqlEscape(searchTerm)}%'`);
+    if (whereClauses.length > 0) soql += ` WHERE ${whereClauses.join(' AND ')}`;
+
+    soql += ` ORDER BY LastModifiedDate DESC LIMIT ${limit} OFFSET ${offset}`;
+
+    return this.query(soql);
+  }
+
+  async getQuoteById(quoteId) {
+    const soql = `SELECT Id, Name, QuoteNumber, OpportunityId, Opportunity.Name,
+                         Opportunity.AccountId, Opportunity.Account.Name, Status,
+                         ExpirationDate, Discount, Tax, ShippingHandling, Subtotal,
+                         GrandTotal, Pricebook2Id, Description, OwnerId, Owner.Name,
+                         CreatedDate, LastModifiedDate
+                  FROM Quote WHERE Id = '${soqlEscape(quoteId)}'`;
+    return this.query(soql);
+  }
+
+  /**
+   * Line items for a quote, oldest first. QuoteLineItem has no native
+   * "sort order" field on the standard object, so display/edit order is
+   * derived from creation order instead - see replaceQuoteLineItems() below,
+   * which always re-creates the full set in the caller's intended order so
+   * this ordering stays meaningful after every save (including reorders).
+   */
+  async getQuoteLineItems(quoteId) {
+    const soql = `SELECT Id, QuoteId, Product2Id, Product2.Name, Product2.ProductCode,
+                         PricebookEntryId, Quantity, UnitPrice, Discount, Description
+                  FROM QuoteLineItem
+                  WHERE QuoteId = '${soqlEscape(quoteId)}'
+                  ORDER BY CreatedDate ASC, Id ASC`;
+    const result = await this.query(soql);
+    return result.records;
+  }
+
+  async createQuote(quoteData) {
+    if (!quoteData.Name || !quoteData.OpportunityId) {
+      throw new Error('Missing required field: Name and OpportunityId are required');
+    }
+
+    const pricebookId = await this.resolveQuotePricebookId(quoteData.OpportunityId);
+
+    return this.request('POST', '/sobjects/Quote', {
+      ...quoteData,
+      Pricebook2Id: pricebookId,
+    });
+  }
+
+  async updateQuote(quoteId, updates) {
+    return this.request('PATCH', `/sobjects/Quote/${quoteId}`, updates);
+  }
+
+  async deleteQuote(quoteId) {
+    return this.request('DELETE', `/sobjects/Quote/${quoteId}`);
+  }
+
+  /**
+   * Replace every QuoteLineItem on a quote with `items`, in the given order.
+   * This backs both "save my edits to the line item table" and "reorder
+   * rows" - there is no writable ordering field to PATCH, so a reorder is
+   * implemented as re-creating the whole set in the new order (Salesforce
+   * assigns CreatedDate sequentially within one Collections insert, which is
+   * what getQuoteLineItems() sorts by).
+   *
+   * Deliberately INSERT-then-DELETE, not the other way around: if the
+   * insert of the new set fails (validation error, permissions, etc.) the
+   * old line items are untouched and no data is lost. If the delete of the
+   * old set then fails, the caller is told exactly which old records are
+   * now orphaned duplicates so it can surface that and retry the cleanup,
+   * rather than silently leaving the quote in a half-migrated state.
+   */
+  async replaceQuoteLineItems(quoteId, items) {
+    if (items.length > 200) {
+      throw new Error('A quote cannot have more than 200 line items in a single save');
+    }
+
+    const existing = await this.getQuoteLineItems(quoteId);
+
+    let inserted = [];
+    if (items.length > 0) {
+      const records = items.map((item) => ({
+        attributes: { type: 'QuoteLineItem' },
+        QuoteId: quoteId,
+        PricebookEntryId: item.pricebookEntryId,
+        Quantity: item.quantity,
+        UnitPrice: item.unitPrice,
+        Discount: item.discount || 0,
+        Description: item.description || null,
+      }));
+
+      const insertResult = await this.request('POST', '/composite/sobjects', {
+        allOrNone: true,
+        records,
+      });
+
+      inserted = insertResult;
+    }
+
+    let deletedOldCount = 0;
+    let orphanedOldIds = [];
+    if (existing.length > 0) {
+      try {
+        const idList = existing.map((rec) => rec.Id).join(',');
+        await this.request('DELETE', `/composite/sobjects?ids=${encodeURIComponent(idList)}&allOrNone=true`);
+        deletedOldCount = existing.length;
+      } catch (deleteError) {
+        orphanedOldIds = existing.map((rec) => rec.Id);
+        console.error(`Failed to remove ${existing.length} superseded line item(s) on quote ${quoteId}:`, deleteError.message);
+      }
+    }
+
+    return { inserted, deletedOldCount, orphanedOldIds };
+  }
+
+  async getQuoteStatuses() {
+    return this.getPicklistValues('Quote', 'Status');
+  }
+
+  // ========================================================================
+  // DATA EXPORT (Bulk Operations page - "Export Data")
+  // ========================================================================
+
+  /**
+   * Every matching record for one of EXPORT_OBJECT_CONFIG's objects, for the
+   * Bulk Operations page's export tab. Uses queryAll() (follows
+   * nextRecordsUrl until exhausted) rather than the paginated getX() methods
+   * elsewhere in this file, which always cap at a LIMIT/OFFSET page - an
+   * export needs the full matching set, not one page of it.
+   */
+  async exportObjectRecords(objectType, filters = {}) {
+    const config = EXPORT_OBJECT_CONFIG[objectType];
+    if (!config) {
+      const err = new Error(`Unsupported export object type: ${objectType}`);
+      err.status = 400;
+      throw err;
+    }
+
+    const { search, dateFrom, dateTo } = filters;
+
+    let soql = `SELECT ${config.fields.join(', ')} FROM ${objectType}`;
+    const whereClauses = [];
+
+    if (search && config.searchField) {
+      whereClauses.push(`${config.searchField} LIKE '%${soqlEscape(search)}%'`);
+    }
+
+    // Date literals (unlike string literals) take no surrounding quotes -
+    // isPlainDate() is the actual safety check here, not soqlEscape, since a
+    // quoted value would just be a different kind of malformed query, not a
+    // safe one.
+    if (dateFrom) {
+      if (!isPlainDate(dateFrom)) {
+        const err = new Error('dateFrom must be a YYYY-MM-DD date');
+        err.status = 400;
+        throw err;
+      }
+      whereClauses.push(`CreatedDate >= ${dateFrom}T00:00:00Z`);
+    }
+    if (dateTo) {
+      if (!isPlainDate(dateTo)) {
+        const err = new Error('dateTo must be a YYYY-MM-DD date');
+        err.status = 400;
+        throw err;
+      }
+      whereClauses.push(`CreatedDate <= ${dateTo}T23:59:59Z`);
+    }
+
+    if (whereClauses.length > 0) {
+      soql += ` WHERE ${whereClauses.join(' AND ')}`;
+    }
+
+    soql += ` ORDER BY CreatedDate DESC`;
+
+    return this.queryAll(soql);
   }
 
   // ========================================================================

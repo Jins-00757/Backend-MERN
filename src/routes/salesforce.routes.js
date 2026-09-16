@@ -11,6 +11,7 @@ import * as bulkCtrl from '../controllers/bulkOperationsController.js';
 import * as leadsCtrl from '../controllers/leadsController.js';
 import * as contractsCtrl from '../controllers/contractsController.js';
 import * as mapCtrl from '../controllers/mapController.js';
+import * as quotesCtrl from '../controllers/quotesController.js';
 
 const router = express.Router();
 
@@ -112,6 +113,30 @@ router.post('/contracts', canWrite, contractsCtrl.createContract);
 router.patch('/contracts/:id', canWrite, contractsCtrl.updateContract);
 
 // ========================================================================
+// QUOTES ROUTES - the quotation & proposal generator. Reads and everyday
+// writes (create/update/save line items/download/email) follow the same
+// baseline read:all/write:own permissions as opportunities/accounts/contacts
+// above; only deleting a quote outright is restricted to manager/admin, same
+// reasoning as every other outright-delete in this router.
+// ========================================================================
+
+// Must be registered before '/quotes/:id' - otherwise Express would match
+// these paths with id='meta'/'products'.
+router.get('/quotes/meta/statuses', authorize(['read:all']), quotesCtrl.getQuoteStatuses);
+router.get('/quotes/products', authorize(['read:all']), quotesCtrl.getProductCatalog);
+router.get('/quotes', authorize(['read:all']), quotesCtrl.getQuotes);
+router.get('/quotes/:id', authorize(['read:all']), quotesCtrl.getQuoteById);
+router.post('/quotes', canWrite, quotesCtrl.createQuote);
+router.patch('/quotes/:id', canWrite, quotesCtrl.updateQuote);
+router.delete('/quotes/:id', canDelete, quotesCtrl.deleteQuote);
+router.put('/quotes/:id/line-items', canWrite, quotesCtrl.saveQuoteLineItems);
+router.get('/quotes/:id/pdf', authorize(['read:all']), quotesCtrl.getQuotePdfLink);
+// Sends an outbound email to an address the user supplies - same
+// sensitiveOperationLimiter budget as other outbound/bulk actions above,
+// so it can't be used to blast the connected mailbox.
+router.post('/quotes/:id/email', canWrite, sensitiveOperationLimiter, quotesCtrl.emailQuotePdf);
+
+// ========================================================================
 // BULK OPERATIONS ROUTES - insert/update/upsert/delete against Salesforce
 // at scale, so creating/uploading/closing a job requires manager/admin;
 // reading the status of a job you already own stays available to whoever
@@ -127,6 +152,16 @@ router.patch('/contracts/:id', canWrite, contractsCtrl.updateContract);
 // consuming the hourly budget - three counts per one logical bulk import
 // would let a legitimate user exhaust 5/hour after a single operation.
 // ========================================================================
+
+// Export/template are read-only data pulls (no Salesforce record is ever
+// created/changed/deleted), not job mutations - available to any connected
+// role (read:all) rather than gated to manager/admin like create-job/upload/
+// close below. export additionally passes through sensitiveOperationLimiter
+// since it can pull an org's entire object table in one call, the same
+// "large blast radius" reasoning as create-job; template is small, static,
+// non-sensitive content and needs no extra limiting.
+router.get('/bulk/export', authorize(['read:all']), sensitiveOperationLimiter, bulkCtrl.exportRecords);
+router.get('/bulk/template', authorize(['read:all']), bulkCtrl.getImportTemplate);
 
 router.get('/bulk', authorize(['read:all']), bulkCtrl.getBulkJobs);
 router.post('/bulk/create-job', canDelete, sensitiveOperationLimiter, bulkCtrl.createBulkJob);

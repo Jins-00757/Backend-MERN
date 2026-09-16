@@ -1,6 +1,9 @@
 
 import { Parser } from '@json2csv/plainjs';
 import PDFDocument from 'pdfkit';
+import { calculateLineTotal, calculateQuoteTotals } from '../utils/quoteCalculations.js';
+
+const money = (n) => `$${(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // Human-readable column labels for the generic report exports below, e.g.
 // 'weightedForecast' -> 'Weighted Forecast'. Opportunity export fields keep
@@ -263,6 +266,98 @@ class ExportService {
         rows: rows.map((row) => fields.map((field) => row[field])),
       },
     });
+  }
+
+  /**
+   * Render a Quote + its line items as a client-ready, styled PDF - the
+   * server-side counterpart to the quote builder's live in-browser total
+   * preview (quotesController.js's PDF/email endpoints call this). Uses the
+   * exact same math as the frontend preview (see utils/quoteCalculations.js)
+   * so nothing here can disagree with what the user saw while editing.
+   */
+  async exportQuoteToPDF(quote, lineItems, user) {
+    try {
+      const doc = new PDFDocument({ margin: 50, bufferPages: true });
+
+      const totals = calculateQuoteTotals({
+        lineItems: lineItems.map((li) => ({
+          quantity: li.Quantity,
+          unitPrice: li.UnitPrice,
+          discount: li.Discount,
+        })),
+        discount: quote.Discount,
+        tax: quote.Tax,
+        shippingHandling: quote.ShippingHandling,
+      });
+
+      // Header
+      doc.fontSize(20).font('Helvetica-Bold').fillColor('#111827').text('Sales Pipeline Intelligence', { align: 'left' });
+      doc.fontSize(10).font('Helvetica').fillColor('#6b7280').text('Quotation & Proposal', { align: 'left' });
+      doc.moveDown(1);
+
+      doc.fontSize(16).font('Helvetica-Bold').fillColor('#111827').text(quote.Name || 'Untitled Quote');
+      doc.fontSize(10).font('Helvetica').fillColor('#6b7280').text(`Quote Number: ${quote.QuoteNumber || '—'}`);
+      doc.moveDown(0.75);
+
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Account: ', { continued: true }).font('Helvetica').text(quote.Opportunity?.Account?.Name || '—');
+      doc.font('Helvetica-Bold').text('Opportunity: ', { continued: true }).font('Helvetica').text(quote.Opportunity?.Name || '—');
+      doc.font('Helvetica-Bold').text('Status: ', { continued: true }).font('Helvetica').text(quote.Status || '—');
+      doc.font('Helvetica-Bold').text('Expiration Date: ', { continued: true }).font('Helvetica').text(quote.ExpirationDate ? new Date(quote.ExpirationDate).toLocaleDateString() : 'No expiration set');
+      doc.font('Helvetica-Bold').text('Prepared By: ', { continued: true }).font('Helvetica').text(user?.name || '—');
+      doc.moveDown();
+
+      if (quote.Description) {
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#111827').text('Notes');
+        doc.fontSize(9).font('Helvetica').fillColor('#374151').text(quote.Description);
+        doc.moveDown();
+      }
+
+      // Line items table
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#111827').text('Products & Services');
+      doc.moveDown(0.25);
+
+      this.addTable(doc, {
+        headers: ['Product', 'Qty', 'Unit Price', 'Discount', 'Line Total'],
+        rows: lineItems.map((li) => [
+          li.Product2?.Name || li.Description || 'Custom line item',
+          String(li.Quantity ?? 0),
+          money(li.UnitPrice),
+          `${li.Discount || 0}%`,
+          money(calculateLineTotal({ quantity: li.Quantity, unitPrice: li.UnitPrice, discount: li.Discount })),
+        ]),
+      });
+
+      if (lineItems.length === 0) {
+        doc.fontSize(9).font('Helvetica').fillColor('#9ca3af').text('No line items on this quote yet.');
+      }
+
+      doc.moveDown();
+
+      // Totals summary, right-aligned
+      const summaryLines = [
+        ['Subtotal', money(totals.subtotal)],
+        [`Discount (${quote.Discount || 0}%)`, `-${money(totals.discountAmount)}`],
+        ['Tax', money(totals.tax)],
+        ['Shipping & Handling', money(totals.shippingHandling)],
+      ];
+
+      doc.fontSize(10).font('Helvetica');
+      summaryLines.forEach(([label, value]) => {
+        doc.text(`${label}: ${value}`, { align: 'right' });
+      });
+      doc.moveDown(0.25);
+      doc.fontSize(13).font('Helvetica-Bold').fillColor('#111827').text(`Grand Total: ${money(totals.grandTotal)}`, { align: 'right' });
+
+      doc.moveDown(2);
+      doc.fontSize(8).font('Helvetica').fillColor('#9ca3af').text(
+        `Generated on ${new Date().toLocaleString()} by ${user?.name || 'Sales Pipeline Intelligence'}. This quotation is valid until the expiration date shown above.`,
+        { align: 'center' }
+      );
+
+      return doc;
+    } catch (error) {
+      throw new Error(`Quote PDF export failed: ${error.message}`);
+    }
   }
 
   addTable(doc, table) {

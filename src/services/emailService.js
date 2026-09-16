@@ -294,3 +294,53 @@ export const sendDailySummaryEmail = async ({ to, name, stats }) => {
       .join('\n')}`,
   });
 };
+
+const quotePdfTemplate = ({ recipientName, senderName, quoteName, quoteNumber, accountName, grandTotal }) => `
+<div style="background-color:#f4f5fa;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb;">
+    ${brandHeader}
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <h1 style="font-size:20px;color:#111827;margin:0 0 12px;">Your quote from ${senderName || 'Sales Pipeline Intelligence'}</h1>
+        <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 16px;">
+          Hi ${recipientName || 'there'}, please find attached quote <strong>${quoteName}</strong>${quoteNumber ? ` (#${quoteNumber})` : ''}${accountName ? ` for ${accountName}` : ''}.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:8px 32px 32px;">
+        <div style="text-align:center;padding:16px;background:#f9fafb;border-radius:10px;">
+          <div style="font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;">Grand Total</div>
+          <div style="font-size:24px;font-weight:700;color:#111827;">$${Number(grandTotal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+        </div>
+      </td>
+    </tr>
+  </table>
+</div>
+`;
+
+/**
+ * Email a generated quote PDF to a recipient the user chose (quotesController's
+ * emailQuotePdf). The PDF bytes are generated fresh server-side per send
+ * (see ExportService.exportQuoteToPDF) rather than accepted from the client,
+ * so this never trusts client-supplied file content and can't be used to
+ * relay arbitrary attachments.
+ */
+export const sendQuotePdfEmail = async ({ to, recipientName, senderName, quoteName, quoteNumber, accountName, grandTotal, pdfBuffer, pdfFilename }) => {
+  const mailer = getTransporter();
+
+  await mailer.sendMail({
+    from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
+    to,
+    subject: `Quote ${quoteNumber ? `#${quoteNumber} ` : ''}from ${senderName || 'Sales Pipeline Intelligence'}: ${quoteName}`,
+    html: quotePdfTemplate({ recipientName, senderName, quoteName, quoteNumber, accountName, grandTotal }),
+    text: `Hi ${recipientName || 'there'},\n\nPlease find attached quote "${quoteName}"${quoteNumber ? ` (#${quoteNumber})` : ''}${accountName ? ` for ${accountName}` : ''}.\nGrand Total: $${Number(grandTotal || 0).toLocaleString()}`,
+    attachments: [
+      {
+        filename: pdfFilename,
+        content: pdfBuffer,
+        contentType: 'application/pdf',
+      },
+    ],
+  });
+};

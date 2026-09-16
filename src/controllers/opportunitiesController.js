@@ -122,8 +122,8 @@ const recordActivity = async (req, { action, eventType, resourceId, changes, tit
  */
 export const getOpportunities = async (req, res) => {
   try {
-    const { limit = 50, offset = 0, stage, amountMin, amountMax } = req.query;
-    const cacheKey = `opp_list_${req.user._id}_${limit}_${offset}_${stage}`;
+    const { limit = 50, offset = 0, stage, amountMin, amountMax, accountId, search } = req.query;
+    const cacheKey = `opp_list_${req.user._id}_${limit}_${offset}_${stage}_${accountId}_${search}`;
 
     // Check cache
     let cached = await cacheService.get(cacheKey);
@@ -142,6 +142,8 @@ export const getOpportunities = async (req, res) => {
       stageName: stage,
       amountMin: amountMin ? parseFloat(amountMin) : null,
       amountMax: amountMax ? parseFloat(amountMax) : null,
+      accountId,
+      searchTerm: search,
     });
 
     // Cache for 5 minutes

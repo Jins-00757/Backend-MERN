@@ -380,13 +380,18 @@ export const getMe = async (req, res, next) => {
  */
 export const updateProfile = async (req, res, next) => {
   try {
-    const { name, company, jobTitle, department, phoneNumber, bio, preferences } = req.body;
+    const { name, company, jobTitle, department, territory, phoneNumber, bio, profilePicture, preferences } = req.body;
 
     // ========================================================================
     // VALIDATION
     // ========================================================================
 
-    if (name && (name.length < 2 || name.length > 100)) {
+    // `name` is the one field that can never be legitimately cleared (every
+    // user must have one), so it alone still requires a non-empty value when
+    // sent. Every other text field below now accepts an empty string as an
+    // explicit "clear this" - see the `!== undefined` checks below, which
+    // replaced the old truthy checks that silently ignored an edit-to-blank.
+    if (name !== undefined && (name.length < 2 || name.length > 100)) {
       return next(
         new AppError('Name must be between 2 and 100 characters', 400)
       );
@@ -398,18 +403,32 @@ export const updateProfile = async (req, res, next) => {
       );
     }
 
+    if (profilePicture && !/^https?:\/\/\S+$/i.test(profilePicture)) {
+      return next(
+        new AppError('Profile picture must be a valid http(s) URL', 400)
+      );
+    }
+
     // ========================================================================
     // UPDATE USER
     // ========================================================================
 
     const updateData = {};
 
-    if (name) updateData.name = name.trim();
-    if (company) updateData.company = company.trim();
-    if (jobTitle) updateData.jobTitle = jobTitle.trim();
-    if (department) updateData.department = department.trim();
-    if (phoneNumber) updateData.phoneNumber = phoneNumber.trim();
-    if (bio) updateData.bio = bio.trim();
+    // BUG FIX: every field below used to be gated on `if (field)` - a
+    // falsy-but-explicit edit (clearing "Company" back to an empty string,
+    // say) was silently dropped, so the old value stuck around no matter
+    // what the form submitted. `!== undefined` still leaves fields the
+    // caller didn't mention at all untouched (e.g. Navbar's notifications-only
+    // preferences update below), it just stops treating "" as "no change".
+    if (name !== undefined) updateData.name = name.trim();
+    if (company !== undefined) updateData.company = company.trim();
+    if (jobTitle !== undefined) updateData.jobTitle = jobTitle.trim();
+    if (department !== undefined) updateData.department = department.trim();
+    if (territory !== undefined) updateData.territory = territory.trim();
+    if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber.trim();
+    if (bio !== undefined) updateData.bio = bio.trim();
+    if (profilePicture !== undefined) updateData.profilePicture = profilePicture.trim();
 
     // Merge rather than replace `preferences` wholesale - a caller updating
     // just one setting (e.g. the notifications toggle in Navbar.jsx sending

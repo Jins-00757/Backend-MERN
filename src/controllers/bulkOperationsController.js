@@ -2,7 +2,7 @@
 
 import { readFile } from 'fs/promises';
 import { parse as parseCsv } from 'csv-parse/sync';
-import SalesforceService from '../services/salesforceService.js';
+import SalesforceService, { EXPORT_OBJECT_CONFIG } from '../services/salesforceService.js';
 import cacheService from '../services/CacheService.js';
 import BulkJob from '../models/BulkJob.js';
 import AuditLogger from '../services/AuditLogger.js';
@@ -34,6 +34,46 @@ const REQUIRED_FIELDS_BY_OBJECT = {
 };
 
 const isBlank = (value) => value === undefined || value === null || String(value).trim() === '';
+
+// A few genuinely useful optional columns per object, added to
+// REQUIRED_FIELDS_BY_OBJECT above when building a downloadable import
+// template (getImportTemplate) - enough to show the shape of a real row
+// without listing every field Salesforce accepts.
+const TEMPLATE_OPTIONAL_FIELDS = {
+  Opportunity: ['Amount', 'Probability', 'Description'],
+  Account: ['Industry', 'Phone', 'Website', 'BillingCity', 'BillingState'],
+  Contact: ['FirstName', 'Email', 'Phone', 'Title'],
+  Task: ['Description', 'Priority', 'ActivityDate'],
+};
+
+// Realistic placeholder values for the template's one example data row,
+// keyed by field name - shared across objects since e.g. "Phone" means the
+// same thing everywhere. Any column without an entry here just falls back
+// to the literal word "value".
+const TEMPLATE_SAMPLE_VALUES = {
+  Id: '006XXXXXXXXXXXXXXX',
+  Name: 'New Deal',
+  StageName: 'Prospecting',
+  CloseDate: '2026-12-31',
+  AccountId: '001XXXXXXXXXXXXXXX',
+  LastName: 'Doe',
+  FirstName: 'Jane',
+  Email: 'jane.doe@example.com',
+  Phone: '+1-555-0100',
+  Title: 'Buyer',
+  Subject: 'Follow up call',
+  Amount: '50000',
+  Probability: '60',
+  Description: 'Optional notes',
+  Industry: 'Technology',
+  Website: 'https://example.com',
+  BillingCity: 'San Francisco',
+  BillingState: 'CA',
+  Priority: 'Normal',
+  ActivityDate: '2026-01-15',
+};
+
+const csvCell = (value) => `"${String(value).replace(/"/g, '""')}"`;
 
 /**
  * Validate every record before it's ever sent to Salesforce, splitting the
@@ -734,6 +774,122 @@ export const createFailedDownloadLink = async (req, res) => {
 };
 
 /**
+ * @route   GET /api/salesforce/bulk/export
+ * @desc    Export every Account/Contact/Lead/Opportunity/Contract/Quote/Task
+ *          record (optionally filtered by name search and/or a CreatedDate
+ *          range) as a secure, single-use CSV download link - the "Export
+ *          Data" tab's action. Distinct from results/failed-download-link
+ *          above, which only cover the outcome of a bulk job that was just
+ *          run; this pulls existing Salesforce data directly.
+ * @access  Private
+ */
+export const exportRecords = async (req, res) => {
+  try {
+    const { objectType, search, dateFrom, dateTo } = req.query;
+
+    if (!EXPORT_OBJECT_CONFIG[objectType]) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid object type. Must be one of: ${Object.keys(EXPORT_OBJECT_CONFIG).join(', ')}`,
+      });
+    }
+
+    const salesforce = new SalesforceService(req.user);
+    const rawRecords = await salesforce.exportObjectRecords(objectType, { search, dateFrom, dateTo });
+    const records = rawRecords.map(({ attributes, ...rest }) => rest);
+
+    if (records.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No records matched your export filters',
+        data: { downloadUrl: null, recordCount: 0 },
+      });
+    }
+
+    const csv = await ExportService.exportRowsToCSV(records, EXPORT_OBJECT_CONFIG[objectType].fields);
+    const filename = `${objectType.toLowerCase()}-export-${Date.now()}.csv`;
+
+    const { token, fileHash, expiresAt } = await createDownloadToken({
+      userId: req.user._id,
+      ip: req.ip,
+      filename,
+      contentType: 'text/csv',
+      content: csv,
+    });
+
+    AuditLogger.log('EXPORT', {
+      userId: req.user._id,
+      resourceType: objectType,
+      resourceId: 'bulk-export',
+      changes: { recordCount: records.length, filename, fileHash, search, dateFrom, dateTo },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log bulk export:', err.message));
+
+    res.status(200).json({
+      success: true,
+      data: { downloadUrl: `/export/download/${token}`, filename, expiresAt, fileHash, recordCount: records.length },
+    });
+  } catch (error) {
+    console.error('Error exporting records:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @route   GET /api/salesforce/bulk/template
+ * @desc    A downloadable CSV template (header row + one example row) for
+ *          the given object type/operation, so an import file's column
+ *          headers match Salesforce field names on the first try instead of
+ *          by trial and error. Static, non-sensitive content - served
+ *          directly rather than through the secure download-token flow that
+ *          the other CSV endpoints above use for *user-specific* export data.
+ * @access  Private
+ */
+export const getImportTemplate = (req, res) => {
+  try {
+    const { objectType, operation = 'insert' } = req.query;
+
+    if (!REQUIRED_FIELDS_BY_OBJECT[objectType]) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid object type. Must be one of: ${Object.keys(REQUIRED_FIELDS_BY_OBJECT).join(', ')}`,
+      });
+    }
+
+    if (!['insert', 'update', 'upsert', 'delete'].includes(operation)) {
+      return res.status(400).json({ success: false, message: 'Invalid operation' });
+    }
+
+    const requiredFields = REQUIRED_FIELDS_BY_OBJECT[objectType];
+    const optionalFields = TEMPLATE_OPTIONAL_FIELDS[objectType] || [];
+
+    let columns;
+    if (operation === 'delete') {
+      columns = ['Id'];
+    } else if (operation === 'update') {
+      columns = ['Id', ...optionalFields.slice(0, 3)];
+    } else if (operation === 'upsert') {
+      columns = ['Id', ...requiredFields];
+    } else {
+      columns = [...requiredFields, ...optionalFields];
+    }
+    columns = [...new Set(columns)];
+
+    const sampleRow = columns.map((col) => TEMPLATE_SAMPLE_VALUES[col] || 'value');
+    const csv = [columns.join(','), sampleRow.map(csvCell).join(',')].join('\n');
+    const filename = `${objectType.toLowerCase()}-${operation}-template.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Error generating import template:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * @route   GET /api/salesforce/bulk
  * @desc    Get all bulk jobs for user
  * @access  Private
@@ -782,5 +938,7 @@ export default {
   getBulkJobFailedRecords,
   createResultsDownloadLink,
   createFailedDownloadLink,
+  exportRecords,
+  getImportTemplate,
   getBulkJobs,
 };

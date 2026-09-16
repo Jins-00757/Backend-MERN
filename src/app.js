@@ -76,6 +76,13 @@ connectDB().catch((error) => {
   // ========================================================================
   // Body Parser Middleware
   // ========================================================================
+  // A quote can carry up to 200 line items in one save (see
+  // quotesController.saveQuoteLineItems) - well past the global 10kb JSON
+  // cap below, which exists to bound request size everywhere else. Body-parser
+  // skips re-parsing a body it's already set (req._body), so registering this
+  // wider, path-scoped limit first - and only for the quotes routes - raises
+  // the cap there without loosening it for any other endpoint.
+  app.use('/api/salesforce/quotes', express.json({ limit: '256kb' }));
   app.use(express.json({ limit: '10kb' }));
   app.use(express.urlencoded({ limit: '10kb', extended: false }));
  
