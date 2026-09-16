@@ -31,6 +31,13 @@ const getTransporter = () => {
       connectionTimeout: 15000,
       greetingTimeout: 15000,
       socketTimeout: 20000,
+      // Render (and many PaaS hosts) has no outbound IPv6 route, but
+      // smtp.gmail.com is dual-stack and Node's default DNS resolution can
+      // still hand back an IPv6 address first - that connection then fails
+      // immediately with ENETUNREACH even though the mail server is
+      // perfectly reachable over IPv4. Forcing IPv4 here sidesteps that
+      // entirely rather than depending on the host's IPv6 support.
+      family: 4,
     });
   }
 
