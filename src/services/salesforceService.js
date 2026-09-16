@@ -1093,6 +1093,40 @@ async getSalesPipelineSummary() {
     return result.records;
   }
 
+  /**
+   * POST/PATCH a Quote, tolerating fields this org's field-level security
+   * rejects. Some orgs leave individual standard Quote fields (observed:
+   * Discount) without FLS granted for any profile even though the object
+   * itself is fully accessible and other sibling fields (Tax,
+   * ShippingHandling) are fine - Salesforce's own Profile metadata can even
+   * claim the field is editable while the live DescribeFieldResult still
+   * reports it as not createable/updateable, so this isn't something a
+   * one-time permission fix reliably resolves. Rather than hard-failing the
+   * whole quote because of one such field, retry once with exactly the
+   * rejected field(s) dropped - the rest of the quote still saves, which
+   * matters more than a header-level Discount field that has a per-line
+   * equivalent (QuoteLineItem.Discount) anyway.
+   */
+  async _requestDroppingRejectedFields(method, endpoint, data) {
+    try {
+      return await this.request(method, endpoint, data);
+    } catch (error) {
+      const sfError = error.salesforceError?.[0];
+      const rejectedFields = sfError?.errorCode === 'INVALID_FIELD_FOR_INSERT_UPDATE' ? sfError.fields : null;
+      const fieldsPresent = rejectedFields?.filter((f) => f in data) || [];
+
+      if (fieldsPresent.length === 0) throw error;
+
+      console.error(
+        `Salesforce rejected field(s) [${fieldsPresent.join(', ')}] on ${method} ${endpoint} for this org's field-level security - retrying without them.`
+      );
+      const reduced = { ...data };
+      for (const field of fieldsPresent) delete reduced[field];
+
+      return this.request(method, endpoint, reduced);
+    }
+  }
+
   async createQuote(quoteData) {
     if (!quoteData.Name || !quoteData.OpportunityId) {
       throw new Error('Missing required field: Name and OpportunityId are required');
@@ -1100,14 +1134,14 @@ async getSalesPipelineSummary() {
 
     const pricebookId = await this.resolveQuotePricebookId(quoteData.OpportunityId);
 
-    return this.request('POST', '/sobjects/Quote', {
+    return this._requestDroppingRejectedFields('POST', '/sobjects/Quote', {
       ...quoteData,
       Pricebook2Id: pricebookId,
     });
   }
 
   async updateQuote(quoteId, updates) {
-    return this.request('PATCH', `/sobjects/Quote/${quoteId}`, updates);
+    return this._requestDroppingRejectedFields('PATCH', `/sobjects/Quote/${quoteId}`, updates);
   }
 
   async deleteQuote(quoteId) {
