@@ -43,6 +43,20 @@ export const soqlEscape = (value) =>
 export const isPlainDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 
 /**
+ * Whitelist for getOpportunities()'s sortBy filter - an ORDER BY field name
+ * takes no quotes, so it must be validated against known-safe values rather
+ * than escaped. Mirrors SearchService's SORTABLE_FIELDS.
+ */
+const OPPORTUNITY_SORTABLE_FIELDS = {
+  CloseDate: 'CloseDate',
+  Amount: 'Amount',
+  Name: 'Name',
+  StageName: 'StageName',
+  CreatedDate: 'CreatedDate',
+  LastModifiedDate: 'LastModifiedDate',
+};
+
+/**
  * Field lists for the Bulk Operations page's "Export Data" tab - one curated,
  * hardcoded SELECT per object rather than accepting field names from the
  * client, which would otherwise be the one place in this service where a
@@ -446,6 +460,12 @@ async getSalesPipelineSummary() {
       searchTerm,
     } = filters;
 
+    // sortBy/sortOrder are spliced into SOQL unquoted (a field/direction name
+    // takes no quotes, so soqlEscape's string-literal escaping wouldn't help)
+    // - only a value from this whitelist is safe to use.
+    const sortField = OPPORTUNITY_SORTABLE_FIELDS[sortBy] || OPPORTUNITY_SORTABLE_FIELDS.CloseDate;
+    const sortDirection = sortOrder === 'ASC' ? 'ASC' : 'DESC';
+
     let soql = `SELECT Id, Name, StageName, Amount, CloseDate,
                        Probability, AccountId, Account.Name, OwnerId, Owner.Name, CreatedDate,
                        LastModifiedDate FROM Opportunity`;
@@ -476,7 +496,7 @@ async getSalesPipelineSummary() {
       soql += ` WHERE ${whereClauses.join(' AND ')}`;
     }
 
-    soql += ` ORDER BY ${sortBy} ${sortOrder} LIMIT ${limit} OFFSET ${offset}`;
+    soql += ` ORDER BY ${sortField} ${sortDirection} LIMIT ${limit} OFFSET ${offset}`;
 
     return this.query(soql);
   }
