@@ -59,7 +59,8 @@ Copy `.env.example` to `.env` and fill these in. **Never commit `.env`.**
 | `JWT_EXPIRE` | yes | e.g. `7d`. |
 | `CLIENT_URL` | yes | The deployed frontend's origin. Used for CORS **and** as the base of every emailed link (password reset, verification, OAuth redirect back to the app). |
 | `ENCRYPTION_KEY` | yes | Encrypts Salesforce access/refresh tokens at rest (AES-256, hashed down from whatever length you provide). Use a long random value. |
-| `REDIS_HOST` / `REDIS_PORT` | yes | Redis connection. |
+| `REDIS_HOST` / `REDIS_PORT` | yes (local) | Plain Redis connection, used when `REDIS_URL` is unset - fine for the bundled local dev server, which has no password. |
+| `REDIS_URL` | yes (production) | A hosted Redis instance's full connection string (e.g. `redis://:password@host:port`, as Render's Key Value gives you). Takes priority over `REDIS_HOST`/`REDIS_PORT` when set - a hosted instance's password has no other way to travel. |
 | `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_USER` / `EMAIL_PASSWORD` / `EMAIL_FROM` | no | SMTP credentials. For Gmail, use an [App Password](https://myaccount.google.com/apppasswords), not the account password. Without these, email-dependent features log an error but never block the underlying action (e.g. signup still succeeds without a verification email). |
 | `SALESFORCE_CLIENT_ID` / `SALESFORCE_CLIENT_SECRET` | no | From your Salesforce Connected App. Without these, Salesforce features return a clear "not configured" error rather than crashing. |
 | `SALESFORCE_USERNAME` | no | Used by supporting tooling only, not the OAuth login flow itself. |

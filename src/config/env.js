@@ -23,7 +23,12 @@ export const config = {
   // Encryption
   encryptionKey: process.env.ENCRYPTION_KEY || 'your-32-char-encryption-key-here',
 
-  // Redis (rate limiting + distributed caching)
+  // Redis (rate limiting + distributed caching). REDIS_URL (e.g.
+  // redis://:password@host:port, as a hosted provider like Render's Key
+  // Value gives you) takes priority when set, since a hosted instance
+  // almost always requires a password that plain REDIS_HOST/REDIS_PORT have
+  // no way to carry - see config/redisClient.js.
+  redisUrl: process.env.REDIS_URL,
   redisHost: process.env.REDIS_HOST || 'localhost',
   redisPort: parseInt(process.env.REDIS_PORT || '6379', 10),
 

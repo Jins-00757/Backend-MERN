@@ -6,16 +6,23 @@ import { config } from './env.js';
  * (middleware/rateLimiter.js) and the cache service (services/CacheService.js)
  * rather than opening a separate socket for each.
  */
+// A hosted Redis (e.g. Render's Key Value) is reachable only via one
+// connection string that already carries its password - REDIS_URL, when
+// set, is used as-is instead of the plain REDIS_HOST/REDIS_PORT pair local
+// dev uses (see config/env.js), since those two alone have no way to
+// express a password at all.
 export const redisClient = createClient({
+  ...(config.redisUrl ? { url: config.redisUrl } : {}),
   socket: {
-    host: config.redisHost,
-    port: config.redisPort,
+    ...(config.redisUrl ? {} : { host: config.redisHost, port: config.redisPort }),
     connectTimeout: 5000, // fail fast on startup if Redis isn't reachable
   },
   // The node-redis v4+ client negotiates RESP3 via a HELLO command by
   // default. The local dev Redis server (tools/redis, based on Redis 5.0)
   // predates RESP3 and doesn't understand HELLO at all, so force the
-  // original RESP2 protocol instead.
+  // original RESP2 protocol instead - still fully compatible with modern
+  // Redis (RESP2 is a strict subset every version still speaks), so this is
+  // safe to keep for a hosted instance too.
   RESP: 2,
 });
 
@@ -38,7 +45,7 @@ export const connectRedis = () => {
     connectPromise = redisClient
       .connect()
       .then(() => {
-        console.log(`✅ Redis connected (${config.redisHost}:${config.redisPort})`);
+        console.log(`✅ Redis connected (${config.redisUrl ? 'via REDIS_URL' : `${config.redisHost}:${config.redisPort}`})`);
       })
       .catch((error) => {
         console.error(`❌ Redis connection failed: ${error.message}`);
