@@ -18,6 +18,7 @@ import teamRoutes from './routes/team.routes.js';
 import saasMetricsRoutes from './routes/saasMetrics.routes.js';
 import searchRoutes from './routes/search.routes.js';
 import exportRoutes from './routes/export.routes.js';
+import webhookRoutes from './routes/webhook.routes.js';
 
 // ============================================================================
 // Create Express App
@@ -83,6 +84,14 @@ connectDB().catch((error) => {
   // wider, path-scoped limit first - and only for the quotes routes - raises
   // the cap there without loosening it for any other endpoint.
   app.use('/api/salesforce/quotes', express.json({ limit: '256kb' }));
+  // Inbound Salesforce webhook (see routes/webhook.routes.js) needs the
+  // exact raw request bytes to verify its HMAC signature against (see
+  // middleware/salesforceWebhook.js) - `verify` stashes them on
+  // `req.rawBody` before body-parser discards them during JSON parsing.
+  // Path-scoped and registered ahead of the general parser below for the
+  // same reason as the quotes override above: body-parser skips re-parsing
+  // a body it's already set (req._body).
+  app.use('/api/webhooks', express.json({ limit: '64kb', verify: (req, res, buf) => { req.rawBody = buf; } }));
   app.use(express.json({ limit: '10kb' }));
   app.use(express.urlencoded({ limit: '10kb', extended: false }));
  
@@ -125,6 +134,12 @@ connectDB().catch((error) => {
   // API Routes
   // ========================================================================
  
+  // Inbound Salesforce webhook - public (HMAC-signed, not cookie-auth'd),
+  // see routes/webhook.routes.js. Registered here, outside every other
+  // router's `protect`, since Salesforce itself (not a logged-in browser)
+  // calls this endpoint.
+  app.use('/api/webhooks', webhookRoutes);
+
   // Salesforce OAuth routes (registered before the more general '/api/auth'
   // mount so its unmatched paths are never shadowed by auth.routes.js)
   app.use('/api/auth/salesforce', salesforceAuthRoutes);

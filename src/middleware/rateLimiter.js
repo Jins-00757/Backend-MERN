@@ -132,3 +132,24 @@ export const outboundEmailLimiter = rateLimit({
     });
   },
 });
+
+// Inbound Salesforce webhook (see routes/webhook.routes.js) - unauthenticated
+// (there's no logged-in user to key on, see salesforceWebhook.js), so this
+// is keyed by IP instead. Generous enough for legitimate retries from a
+// Salesforce Flow/Apex callout after a transient failure, while still
+// capping how fast an attacker who doesn't know the HMAC secret can hammer
+// the endpoint - the signature check in verifySalesforceWebhookSignature is
+// the real defense, this is just a backstop against sheer request volume.
+export const webhookLimiter = rateLimit({
+  store: makeStore('rate-limit-webhook:'),
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: (req) => req.ip,
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many webhook requests - please try again shortly.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});

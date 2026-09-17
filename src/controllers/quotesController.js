@@ -1,5 +1,6 @@
 
 import SalesforceService from '../services/salesforceService.js';
+import Quote from '../models/Quote.js';
 import cacheService from '../services/CacheService.js';
 import AuditLogger from '../services/AuditLogger.js';
 import NotificationService from '../services/NotificationService.js';
@@ -202,6 +203,25 @@ export const createQuote = async (req, res) => {
       Tax: Tax !== undefined ? parseFloat(Tax) : null,
       ShippingHandling: ShippingHandling !== undefined ? parseFloat(ShippingHandling) : null,
     });
+
+    // Outbound sync, step 2: now that Salesforce has created the linked
+    // Quote, lock the relationship (Salesforce QuoteId <-> OpportunityId
+    // <-> the user who sent it) in Mongo - this is what lets the inbound
+    // Salesforce webhook (see webhookController.js) find its way back to
+    // *this* user's live dashboard when the Opportunity later closes.
+    // Best-effort: a failure here must never fail the quote Salesforce
+    // already successfully created, it just means this one quote won't get
+    // a real-time "deal won" push later.
+    try {
+      await Quote.create({
+        userId: req.user._id,
+        salesforceQuoteId: result.id,
+        opportunityId: OpportunityId,
+        name: Name,
+      });
+    } catch (linkError) {
+      console.error('Failed to create local Quote sync record:', linkError.message);
+    }
 
     await invalidateQuoteCaches(req.user._id);
 

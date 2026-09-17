@@ -75,6 +75,17 @@ const userSchema = new mongoose.Schema(
     salesforceTokenExpiresAt: Date,
     salesforceConnectedAt: Date,
     
+    // Fraction of a closed-won quote's grand total credited to this rep as
+    // commission (0.1 = 10%) - used by the inbound Salesforce webhook's
+    // real-time "deal closed won" push (see webhookController.js) to
+    // compute the commission figure shown in the celebration toast. A plain
+    // Number rather than a picklist, since commission plans vary per
+    // rep/org and this app has no concept of tiered commission structures.
+    commissionRate: {
+      type: Number,
+      default: 0.1,
+    },
+
     // Day 4: Advanced features
     syncPreferences: {
       autoSync: {

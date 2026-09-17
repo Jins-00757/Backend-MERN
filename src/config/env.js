@@ -53,6 +53,11 @@ export const config = {
     process.env.SALESFORCE_AUTH_URL || 'https://login.salesforce.com/services/oauth2/authorize',
   salesforceTokenUrl:
     process.env.SALESFORCE_TOKEN_URL || 'https://login.salesforce.com/services/oauth2/token',
+
+  // Shared secret Salesforce (a Flow/Apex outbound callout, or a bridging
+  // middle-tier) signs the inbound webhook body with - see
+  // middleware/salesforceWebhook.js and routes/webhook.routes.js.
+  salesforceWebhookSecret: process.env.SALESFORCE_WEBHOOK_SECRET,
 };
  
 // ============================================================================
@@ -100,6 +105,11 @@ if (!config.mongodbUri) {
 // Salesforce warning
 if (!config.salesforceClientId || !config.salesforceClientSecret) {
   console.warn('⚠️  Warning: Salesforce credentials not configured - OAuth will not work');
+}
+
+// Salesforce inbound webhook warning
+if (!config.salesforceWebhookSecret) {
+  console.warn('⚠️  Warning: SALESFORCE_WEBHOOK_SECRET not set - the inbound Salesforce webhook will reject every request');
 }
 
 // Email warning
