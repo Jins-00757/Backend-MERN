@@ -1,47 +1,116 @@
 import nodemailer from 'nodemailer';
+import { resolve4 } from 'node:dns/promises';
 import { config } from '../config/env.js';
 
 /**
  * Single shared SMTP transport, created lazily so a missing/incomplete
  * EMAIL_* config doesn't crash the whole server at import time - it only
  * surfaces as an error when an email actually needs to be sent.
+ *
+ * BUG FIX: nodemailer's `family` transport option (previously set here to
+ * force IPv4) is not actually honored anywhere in its connection logic -
+ * confirmed by reading its installed source (smtp-connection/index.js,
+ * shared/index.js): resolveHostname() unconditionally resolves *both*
+ * A and AAAA records and never once reads a `family` option to skip IPv6.
+ * Render (and many PaaS hosts) has no outbound IPv6 route, so whenever that
+ * dual-stack resolution handed back an IPv6 address for smtp.gmail.com, the
+ * connection failed immediately with ENETUNREACH even with `family: 4` set -
+ * this was silently never actually taking effect.
+ *
+ * The one connection mode nodemailer's resolver can't override: a literal
+ * IP address as `host` short-circuits its DNS resolution entirely
+ * (`net.isIP(options.host)` in resolveHostname()), so it never has the
+ * chance to resolve or try an IPv6 address at all. Resolving the hostname
+ * to a literal IPv4 address ourselves via Node's own `dns.resolve4` (a
+ * genuine A-record lookup, unaffected by local network interface routing)
+ * and passing that as `host`, with `servername` set to the real hostname
+ * for TLS SNI/certificate validation, is the only way that's actually been
+ * confirmed to work.
  */
 let transporter = null;
+let transporterHost = null;
 
-const getTransporter = () => {
+const resolveEmailHostIPv4 = async () => {
+  try {
+    const [address] = await resolve4(config.emailHost);
+    return address;
+  } catch (err) {
+    console.error(`Failed to resolve ${config.emailHost} to an IPv4 address, connecting by hostname instead:`, err.message);
+    return config.emailHost;
+  }
+};
+
+const buildTransporter = async () => {
+  const host = await resolveEmailHostIPv4();
+  transporterHost = host;
+
+  return nodemailer.createTransport({
+    host,
+    // TLS/SNI must still validate against the real hostname, not the IP
+    // literal we're connecting to - see this.servername in
+    // smtp-connection/index.js, which falls back to `false` (no SNI at
+    // all) for a literal IP host unless this is set explicitly.
+    servername: config.emailHost,
+    port: config.emailPort,
+    secure: config.emailPort === 465, // true for 465 (implicit TLS), false for 587 (STARTTLS)
+    auth: {
+      user: config.emailUser,
+      pass: config.emailPassword,
+    },
+    // nodemailer's defaults (2min connect / 10min socket) mean a genuinely
+    // unreachable/blocked SMTP host hangs the request far longer than any
+    // reasonable client timeout, which just looks like "timeout error"
+    // with no indication of why. Fail fast instead, so a real SMTP
+    // problem surfaces as its own clear error rather than being
+    // indistinguishable from ordinary slow-cold-start latency.
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+};
+
+const getTransporter = async () => {
   if (!config.emailUser || !config.emailPassword) {
     throw new Error('Email is not configured (EMAIL_USER/EMAIL_PASSWORD missing)');
   }
 
   if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: config.emailHost,
-      port: config.emailPort,
-      secure: config.emailPort === 465, // true for 465 (implicit TLS), false for 587 (STARTTLS)
-      auth: {
-        user: config.emailUser,
-        pass: config.emailPassword,
-      },
-      // nodemailer's defaults (2min connect / 10min socket) mean a genuinely
-      // unreachable/blocked SMTP host hangs the request far longer than any
-      // reasonable client timeout, which just looks like "timeout error"
-      // with no indication of why. Fail fast instead, so a real SMTP
-      // problem surfaces as its own clear error rather than being
-      // indistinguishable from ordinary slow-cold-start latency.
-      connectionTimeout: 15000,
-      greetingTimeout: 15000,
-      socketTimeout: 20000,
-      // Render (and many PaaS hosts) has no outbound IPv6 route, but
-      // smtp.gmail.com is dual-stack and Node's default DNS resolution can
-      // still hand back an IPv6 address first - that connection then fails
-      // immediately with ENETUNREACH even though the mail server is
-      // perfectly reachable over IPv4. Forcing IPv4 here sidesteps that
-      // entirely rather than depending on the host's IPv6 support.
-      family: 4,
-    });
+    transporter = await buildTransporter();
   }
 
   return transporter;
+};
+
+/**
+ * Connection-level failure codes worth invalidating the cached transporter
+ * over - the resolved IP may have gone stale (Google's SMTP endpoints do
+ * rotate occasionally) or was simply unreachable this one time. Anything
+ * else (auth failure, rejected recipient, etc.) is a real error the caller
+ * should see as-is, not something a fresh IP would fix.
+ */
+const isConnectionLevelError = (err) =>
+  ['ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'ECONNREFUSED', 'ESOCKET'].includes(err.code);
+
+/**
+ * Every send* helper below goes through this instead of calling
+ * transporter.sendMail() directly - on a connection-level failure it drops
+ * the cached transporter (so the *next* send re-resolves a fresh IPv4
+ * address rather than being stuck reusing a bad one for the rest of the
+ * process's life) and retries exactly once against a freshly resolved host.
+ */
+const sendMail = async (mailOptions) => {
+  const mailer = await getTransporter();
+
+  try {
+    return await mailer.sendMail(mailOptions);
+  } catch (err) {
+    if (!isConnectionLevelError(err)) throw err;
+
+    console.error(`SMTP connection to ${transporterHost} failed (${err.code}), re-resolving and retrying once:`, err.message);
+    transporter = null;
+    const retryMailer = await getTransporter();
+    return retryMailer.sendMail(mailOptions);
+  }
 };
 
 const passwordResetTemplate = ({ name, resetUrl }) => `
@@ -98,9 +167,7 @@ const passwordResetTemplate = ({ name, resetUrl }) => `
  * reset flow.
  */
 export const sendPasswordResetEmail = async ({ to, name, resetUrl }) => {
-  const mailer = getTransporter();
-
-  await mailer.sendMail({
+  await sendMail({
     from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
     to,
     subject: 'Reset your Sales Pipeline Intelligence password',
@@ -162,9 +229,7 @@ const verifyEmailTemplate = ({ name, verifyUrl }) => `
  * see auth.controller.js for how each caller handles that.
  */
 export const sendVerificationEmail = async ({ to, name, verifyUrl }) => {
-  const mailer = getTransporter();
-
-  await mailer.sendMail({
+  await sendMail({
     from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
     to,
     subject: 'Verify your Sales Pipeline Intelligence email',
@@ -218,9 +283,7 @@ const stageChangeTemplate = ({ name, dealName, oldStage, newStage, amount }) => 
  * await it or just log the rejection.
  */
 export const sendDealStageChangeEmail = async ({ to, name, dealName, oldStage, newStage, amount }) => {
-  const mailer = getTransporter();
-
-  await mailer.sendMail({
+  await sendMail({
     from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
     to,
     subject: `${dealName}: ${oldStage} → ${newStage}`,
@@ -295,10 +358,9 @@ const dailySummaryTemplate = ({ name, stats }) => {
  * broken mailbox doesn't stop the rest of the batch.
  */
 export const sendDailySummaryEmail = async ({ to, name, stats }) => {
-  const mailer = getTransporter();
   const totalValue = (stats.totalPipelineValue || 0).toLocaleString();
 
-  await mailer.sendMail({
+  await sendMail({
     from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
     to,
     subject: `Daily Pipeline Summary: ${stats.totalOpportunities ?? 0} open deals, $${totalValue}`,
@@ -343,9 +405,7 @@ const quotePdfTemplate = ({ recipientName, senderName, quoteName, quoteNumber, a
  * relay arbitrary attachments.
  */
 export const sendQuotePdfEmail = async ({ to, recipientName, senderName, quoteName, quoteNumber, accountName, grandTotal, pdfBuffer, pdfFilename }) => {
-  const mailer = getTransporter();
-
-  await mailer.sendMail({
+  await sendMail({
     from: `"Sales Pipeline Intelligence" <${config.emailFrom}>`,
     to,
     subject: `Quote ${quoteNumber ? `#${quoteNumber} ` : ''}from ${senderName || 'Sales Pipeline Intelligence'}: ${quoteName}`,
