@@ -23,18 +23,42 @@ import { encryptToken } from '../services/encryptionService.js';
 
 const OAUTH_COOKIE_MAX_AGE = 10 * 60 * 1000; // 10 minutes
 
-const oauthCookieOptions = () => ({
-  httpOnly: true,
-  secure: config.nodeEnv === 'production',
-  sameSite: 'lax', // must survive the top-level redirect back from salesforce.com
-  maxAge: OAUTH_COOKIE_MAX_AGE,
-  signed: true,
-});
+/**
+ * BUG FIX: 'lax' never survives being *set* by a cross-site XHR/fetch
+ * response in the first place - fine when frontend and backend share a
+ * site, but this app is deployed as two separate Render services (a static
+ * site + a web service on different subdomains), which is genuinely
+ * cross-site. getSalesforceAuthUrl() below sets these cookies as the
+ * response to the frontend's `api.get('/auth/salesforce/auth-url')` XHR
+ * call - a cross-site subresource request, not a top-level navigation - so
+ * browsers never stored them, and the later redirect back from Salesforce
+ * always failed with "invalid or expired OAuth state" even though nothing
+ * had actually expired. Exact same bug, and exact same fix, as the main
+ * session cookie in tokenService.js.setTokenCookie(): 'None' requires
+ * `secure: true` (browsers reject it otherwise), which is exactly what
+ * production already sets above.
+ */
+const oauthCookieOptions = () => {
+  const isProduction = config.nodeEnv === 'production';
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'strict',
+    maxAge: OAUTH_COOKIE_MAX_AGE,
+    signed: true,
+  };
+};
 
 const clearOAuthCookies = (res) => {
-  res.clearCookie('oauth_state');
-  res.clearCookie('oauth_uid');
-  res.clearCookie('oauth_verifier');
+  // clearCookie must be called with the same attributes the cookie was set
+  // with (path/secure/sameSite) or the browser won't recognize it as the
+  // same cookie to remove - passing none of them (as before) silently
+  // failed to clear these in production.
+  const isProduction = config.nodeEnv === 'production';
+  const clearOptions = { secure: isProduction, sameSite: isProduction ? 'none' : 'strict' };
+  res.clearCookie('oauth_state', clearOptions);
+  res.clearCookie('oauth_uid', clearOptions);
+  res.clearCookie('oauth_verifier', clearOptions);
 };
 
 const base64url = (buffer) =>
