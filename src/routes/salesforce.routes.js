@@ -140,8 +140,13 @@ router.patch('/quotes/:id', canWrite, quotesCtrl.updateQuote);
 router.delete('/quotes/:id', canDelete, quotesCtrl.deleteQuote);
 router.put('/quotes/:id/line-items', canWrite, quotesCtrl.saveQuoteLineItems);
 router.get('/quotes/:id/pdf', authorize(['read:all']), quotesCtrl.getQuotePdfLink);
-// Sends an outbound email to an address the user supplies - its own,
-// more generous cap (see outboundEmailLimiter) rather than sharing the
+// The Contacts on the quote's related Account that it's allowed to be
+// emailed to (see quotesController.getQuoteRecipients/emailQuotePdf) -
+// read-only, same baseline permission as every other quote read above.
+router.get('/quotes/:id/recipients', authorize(['read:all']), quotesCtrl.getQuoteRecipients);
+// Sends an outbound email to a Contact on the quote's own related Account
+// (never an arbitrary address - see emailQuotePdf) - its own, more
+// generous cap (see outboundEmailLimiter) rather than sharing the
 // bulk-operations budget, since sending a few quote emails is normal
 // day-to-day use, not a large-blast-radius Salesforce write.
 router.post('/quotes/:id/email', canWrite, outboundEmailLimiter, quotesCtrl.emailQuotePdf);

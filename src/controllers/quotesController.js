@@ -433,20 +433,67 @@ export const getQuotePdfLink = async (req, res) => {
 };
 
 /**
+ * @route   GET /api/salesforce/quotes/:id/recipients
+ * @desc    Contacts a quote is allowed to be emailed to - every Contact on
+ *          the quote's own linked Opportunity's Account that has an email
+ *          address on file. Backs the "Email PDF" recipient picker: the
+ *          frontend only ever offers these, never a free-text address (see
+ *          emailQuotePdf below for why that boundary is enforced server-side
+ *          too, not just in the UI).
+ * @access  Private
+ */
+export const getQuoteRecipients = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const salesforce = new SalesforceService(req.user);
+
+    const quoteResult = await salesforce.getQuoteById(id);
+    if (quoteResult.records.length === 0) {
+      return res.status(404).json({ success: false, message: 'Quote not found' });
+    }
+
+    const accountId = quoteResult.records[0].Opportunity?.AccountId;
+    if (!accountId) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    const contactsResult = await salesforce.getContacts(accountId, { limit: 200 });
+    const recipients = contactsResult.records
+      .filter((c) => c.Email && EMAIL_RE.test(c.Email))
+      .map((c) => ({
+        contactId: c.Id,
+        name: [c.FirstName, c.LastName].filter(Boolean).join(' ') || c.Email,
+        email: c.Email,
+        title: c.Title || null,
+      }));
+
+    res.status(200).json({ success: true, data: recipients });
+  } catch (error) {
+    console.error('Error fetching quote recipients:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * @route   POST /api/salesforce/quotes/:id/email
  * @desc    Render the quote to PDF (same renderer as getQuotePdfLink) and
- *          email it as an attachment to a recipient the user supplies -
- *          never a client-uploaded file, so this can't be used to relay
- *          arbitrary attachments through the app's mail account.
+ *          email it to a Contact on the quote's own related Account - by
+ *          design, quotes can only be emailed to someone Salesforce already
+ *          associates with that deal, never an arbitrary address. The
+ *          client sends `contactId` (from getQuoteRecipients above), and the
+ *          actual email address is always re-resolved here from Salesforce,
+ *          never taken from the client - a request tampered with someone
+ *          else's contactId is rejected below, since that id won't appear
+ *          among *this* quote's account's own contacts.
  * @access  Private
  */
 export const emailQuotePdf = async (req, res) => {
   try {
     const { id } = req.params;
-    const { to, recipientName } = req.body;
+    const { contactId } = req.body;
 
-    if (!to || !EMAIL_RE.test(to)) {
-      return res.status(400).json({ success: false, message: 'A valid recipient email address is required' });
+    if (!contactId) {
+      return res.status(400).json({ success: false, message: 'Select a contact to email the quote to' });
     }
 
     const salesforce = new SalesforceService(req.user);
@@ -455,6 +502,26 @@ export const emailQuotePdf = async (req, res) => {
     if (!combined) {
       return res.status(404).json({ success: false, message: 'Quote not found' });
     }
+
+    const accountId = combined.quote.Opportunity?.AccountId;
+    if (!accountId) {
+      return res.status(400).json({ success: false, message: "This quote's opportunity has no related account to email" });
+    }
+
+    const contactsResult = await salesforce.getContacts(accountId, { limit: 200 });
+    const contact = contactsResult.records.find((c) => c.Id === contactId);
+
+    if (!contact) {
+      return res.status(400).json({ success: false, message: 'That contact is not associated with this quote\'s account' });
+    }
+
+    if (!contact.Email || !EMAIL_RE.test(contact.Email)) {
+      const contactName = [contact.FirstName, contact.LastName].filter(Boolean).join(' ') || 'This contact';
+      return res.status(400).json({ success: false, message: `${contactName} has no valid email address on file in Salesforce` });
+    }
+
+    const to = contact.Email;
+    const recipientName = [contact.FirstName, contact.LastName].filter(Boolean).join(' ') || undefined;
 
     const doc = await ExportService.exportQuoteToPDF(combined.quote, combined.lineItems, req.user);
     const pdfBuffer = await pdfDocToBuffer(doc);
@@ -526,5 +593,6 @@ export default {
   deleteQuote,
   saveQuoteLineItems,
   getQuotePdfLink,
+  getQuoteRecipients,
   emailQuotePdf,
 };
