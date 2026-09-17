@@ -24,6 +24,28 @@ export const isGroqConfigured = () => Boolean(config.groqApiKey);
 const truncate = (value, max = MAX_FIELD_LENGTH) =>
   typeof value === 'string' ? value.slice(0, max) : '';
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Retries a single 429 once, since the tool-calling loop (see
+// chatCompletionWithTools/aiToolsService.js) can fire several requests back
+// to back for one user turn - a burst tight enough to trip Groq's
+// per-minute rate/token limit on its own, with no other traffic involved.
+// Respects Groq's own `retry-after` header when present (capped, since a
+// misbehaving/huge value shouldn't stall a request indefinitely); otherwise
+// falls back to a short fixed delay. One retry only - if Groq is still
+// rate-limiting after that, the caller should see the real "busy" error
+// rather than have the request silently hang.
+const MAX_RETRY_DELAY_MS = 5000;
+const DEFAULT_RETRY_DELAY_MS = 1500;
+
+const getRetryDelayMs = (error) => {
+  const headerValue = Number(error.response?.headers?.['retry-after']);
+  if (Number.isFinite(headerValue) && headerValue > 0) {
+    return Math.min(headerValue * 1000, MAX_RETRY_DELAY_MS);
+  }
+  return DEFAULT_RETRY_DELAY_MS;
+};
+
 /**
  * requestGroqMessage - the one place every Groq call in this service goes
  * through, so error mapping/timeouts/JSON-mode wiring stay consistent
@@ -33,7 +55,7 @@ const truncate = (value, max = MAX_FIELD_LENGTH) =>
  * tool_calls) rather than pre-extracting text, so callers that need
  * tool_calls aren't forced to re-request.
  */
-const requestGroqMessage = async (messages, { jsonMode = false, maxTokens = 700, temperature = 0.4, tools } = {}) => {
+const requestGroqMessage = async (messages, { jsonMode = false, maxTokens = 700, temperature = 0.4, tools } = {}, hasRetried = false) => {
   if (!isGroqConfigured()) {
     throw new AppError('AI assistant is not configured', 503);
   }
@@ -72,6 +94,10 @@ const requestGroqMessage = async (messages, { jsonMode = false, maxTokens = 700,
       throw new AppError('AI assistant is not configured correctly', 503);
     }
     if (error.response?.status === 429) {
+      if (!hasRetried) {
+        await sleep(getRetryDelayMs(error));
+        return requestGroqMessage(messages, { jsonMode, maxTokens, temperature, tools }, true);
+      }
       throw new AppError('AI assistant is busy right now - please try again shortly', 429);
     }
     if (error.code === 'ECONNABORTED') {

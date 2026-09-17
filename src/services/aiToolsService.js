@@ -14,11 +14,15 @@ import AuditLogger from './AuditLogger.js';
 import NotificationService from './NotificationService.js';
 
 // Hard cap on tool round-trips per user turn - a full "create an Account,
-// link an Opportunity, generate a Quote" plan needs a handful of rounds
-// (one per tool call, plus a closing round with no further calls), but
-// nothing should ever loop indefinitely against Groq/Salesforce for a
-// single chat message.
-const MAX_TOOL_ROUNDS = 6;
+// link an Opportunity, generate a Quote" plan needs 4 (one round per tool
+// call, plus a closing round with no further calls), plus one spare for an
+// optional find_accounts/find_quotes lookup along the way. Kept deliberately
+// tight rather than generous: each round resends the growing conversation
+// AND the full tool schema to Groq, so more rounds directly means more
+// tokens burned per user turn against Groq's per-minute rate/token limit -
+// see requestGroqMessage's 429 retry in groqService.js for the other half
+// of this tradeoff.
+const MAX_TOOL_ROUNDS = 5;
 
 // Executed immediately, server-side, whenever the model calls one - safe
 // because they only ever read data the calling user already owns (their own
@@ -90,8 +94,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'create_account',
-      description:
-        'Propose creating a new Salesforce Account. Part of the multi-step "new customer" workflow - its returned id (a planning placeholder until confirmed) can be passed as accountId to create_opportunity. Never executes directly; only proposes.',
+      description: 'Propose creating a new Salesforce Account. Its returned id can be passed as accountId to create_opportunity.',
       parameters: {
         type: 'object',
         properties: {
@@ -110,13 +113,12 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'create_opportunity',
-      description:
-        'Propose creating a new Salesforce Opportunity linked to an Account. Use the accountId returned by create_account (or by find_accounts, for an existing account) - its returned id can then be passed as opportunityId to create_quote. Never executes directly; only proposes.',
+      description: 'Propose creating a new Opportunity linked to an Account (from create_account or find_accounts). Its returned id can be passed as opportunityId to create_quote.',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Opportunity/deal name' },
-          accountId: { type: 'string', description: 'Id of the Account this opportunity belongs to' },
+          accountId: { type: 'string', description: 'Account Id this belongs to' },
           stageName: { type: 'string', description: 'Sales stage, e.g. "Prospecting"' },
           closeDate: { type: 'string', description: 'Expected close date, YYYY-MM-DD, must be in the future' },
           amount: { type: 'number', description: 'Deal amount' },
@@ -129,13 +131,12 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'create_quote',
-      description:
-        'Propose creating a new Salesforce Quote linked to an Opportunity. Use the opportunityId returned by create_opportunity (or an existing one from context). Never executes directly; only proposes.',
+      description: 'Propose creating a new Quote linked to an Opportunity (from create_opportunity or context).',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Quote name' },
-          opportunityId: { type: 'string', description: 'Id of the Opportunity this quote belongs to' },
+          opportunityId: { type: 'string', description: 'Opportunity Id this belongs to' },
           expirationDate: { type: 'string', description: 'YYYY-MM-DD' },
           description: { type: 'string' },
         },
@@ -148,7 +149,7 @@ const TOOLS = [
     function: {
       name: 'approve_quote_and_sync_to_salesforce',
       description:
-        'Propose approving a quote and writing the new status to Salesforce. Never executes directly - calling it only surfaces a confirmation the user must explicitly accept in the UI before anything is written. Only works on a quote that already exists in Salesforce - it cannot approve a quote created earlier in the same plan (that quote does not exist yet).',
+        'Propose approving a quote and writing the new status to Salesforce. Only works on a quote that already exists there - never one created earlier in the same plan.',
       parameters: {
         type: 'object',
         properties: {
@@ -422,7 +423,15 @@ export const runAgentTurn = async ({ message, history, user }) => {
           stepCounter += 1;
           const placeholderId = `PLAN_${stepCounter}`;
           plan.push({ tool: name, args, placeholderId, description: describeCreateStep(name, args, plan) });
-          resultForModel = { id: placeholderId, status: 'planned', ...args };
+          // Deliberately doesn't echo `args` back - the model already has
+          // them in the tool_call it just made, and since every prior
+          // message stays in the conversation for the rest of this turn
+          // (see the growing `messages` array below), echoing full record
+          // data back on every planned step compounds into a meaningful
+          // chunk of avoidable token usage across a multi-step plan - a
+          // real cost against Groq's per-minute token limit when several
+          // rounds fire back to back for one turn.
+          resultForModel = { id: placeholderId, status: 'planned' };
         }
       } else {
         resultForModel = { error: `Unknown tool: ${name}` };
