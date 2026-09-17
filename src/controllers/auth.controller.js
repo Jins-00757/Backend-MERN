@@ -290,11 +290,16 @@ export const login = async (req, res) => {
     const token = generateToken(user._id, user.email, user.role);
     setTokenCookie(res, token);
 
-    // Update login timestamp
+    // Update login timestamp - bookkeeping only, nothing in the response
+    // below depends on this write completing (the in-memory `user` object
+    // already reflects these fields regardless of when the save resolves).
+    // Not awaited, so a login response is never delayed by an extra DB round
+    // trip purely for stats - same fire-and-forget pattern already used for
+    // audit logging elsewhere in this file (see deleteAccount above).
     user.lastLoginAt = new Date();
     user.loginCount = (user.loginCount || 0) + 1;
     user.lastActivityAt = new Date();
-    await user.save();
+    user.save().catch((err) => console.error('❌ Failed to record login timestamp:', err.message));
 
     res.status(200).json({
       status: 'ok',
@@ -345,24 +350,22 @@ export const logout = async (req, res, next) => {
  */
 export const getMe = async (req, res, next) => {
   try {
-    // req.user is set by protect middleware
+    // req.user is already the freshly-loaded, non-inactive user document -
+    // protect() (see middleware/auth.js) just fetched it this same request
+    // and already rejects a missing/inactive user before this handler ever
+    // runs. Re-fetching it here was a second, redundant DB round trip on
+    // every single call to this endpoint - and since the frontend calls it
+    // on every app load to restore a session (see AuthProvider.jsx), that
+    // extra query ran on every page load for every user, not just login.
     if (!req.user || !req.user._id) {
       return next(
         new AppError('User not found in request', 401)
       );
     }
 
-    const user = await User.findById(req.user._id);
-
-    if (!user || user.isInactive) {
-      return next(
-        new AppError('User not found or account is inactive', 404)
-      );
-    }
-
     res.status(200).json({
       status: 'ok',
-      data: toPublicProfile(user),
+      data: toPublicProfile(req.user),
     });
   } catch (error) {
     next(error);
