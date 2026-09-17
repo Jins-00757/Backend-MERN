@@ -1,3 +1,5 @@
 {
-  "ignore": ["tools/**", "node_modules/**"]
+  "ignore": ["tools/**", "node_modules/**"],
+  "watch": ["src", "server.js", ".env"],
+  "ext": "js,mjs,cjs,json,env"
 }
