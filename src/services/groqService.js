@@ -25,11 +25,15 @@ const truncate = (value, max = MAX_FIELD_LENGTH) =>
   typeof value === 'string' ? value.slice(0, max) : '';
 
 /**
- * chatCompletion - the one place every Groq call in this service goes
+ * requestGroqMessage - the one place every Groq call in this service goes
  * through, so error mapping/timeouts/JSON-mode wiring stay consistent
- * whether the caller is the free-chat widget or a structured row-action.
+ * whether the caller is the free-chat widget, a structured row-action, or
+ * the tool-calling actions assistant (see chatCompletionWithTools below).
+ * Returns the raw `message` object from the first choice (content and/or
+ * tool_calls) rather than pre-extracting text, so callers that need
+ * tool_calls aren't forced to re-request.
  */
-const chatCompletion = async (messages, { jsonMode = false, maxTokens = 700, temperature = 0.4 } = {}) => {
+const requestGroqMessage = async (messages, { jsonMode = false, maxTokens = 700, temperature = 0.4, tools } = {}) => {
   if (!isGroqConfigured()) {
     throw new AppError('AI assistant is not configured', 503);
   }
@@ -43,6 +47,7 @@ const chatCompletion = async (messages, { jsonMode = false, maxTokens = 700, tem
         temperature,
         max_tokens: maxTokens,
         ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+        ...(tools ? { tools, tool_choice: 'auto' } : {}),
       },
       {
         headers: {
@@ -53,12 +58,12 @@ const chatCompletion = async (messages, { jsonMode = false, maxTokens = 700, tem
       }
     );
 
-    const content = response.data?.choices?.[0]?.message?.content?.trim();
-    if (!content) {
+    const message = response.data?.choices?.[0]?.message;
+    if (!message || (!message.content?.trim() && !message.tool_calls?.length)) {
       throw new AppError('AI assistant returned an empty response', 502);
     }
 
-    return content;
+    return message;
   } catch (error) {
     if (error instanceof AppError) throw error;
 
@@ -77,6 +82,26 @@ const chatCompletion = async (messages, { jsonMode = false, maxTokens = 700, tem
     throw new AppError('AI assistant is temporarily unavailable', 502);
   }
 };
+
+/**
+ * chatCompletion - text-only convenience wrapper over requestGroqMessage,
+ * used by every existing free-chat/structured row-action call site in this
+ * file (none of which use tools). Trims and returns just the reply text.
+ */
+const chatCompletion = async (messages, options = {}) => {
+  const message = await requestGroqMessage(messages, options);
+  return message.content.trim();
+};
+
+/**
+ * chatCompletionWithTools - for the CRM actions assistant (see
+ * aiToolsService.js). Returns the full message (content and/or tool_calls)
+ * so the caller can run its own tool-execution loop; never JSON-mode, since
+ * Groq's tool-calling and response_format:json_object are mutually exclusive
+ * modes.
+ */
+export const chatCompletionWithTools = async (messages, tools, { maxTokens = 500, temperature = 0.2 } = {}) =>
+  requestGroqMessage(messages, { maxTokens, temperature, tools });
 
 const parseJsonResponse = (raw) => {
   try {
@@ -334,10 +359,14 @@ export const parseNaturalLanguageSearch = async ({ naturalLanguageQuery, availab
     throw new AppError('A search query is required', 400);
   }
   const trimmed = naturalLanguageQuery.trim().slice(0, 300);
+  // The model has no reliable notion of "today" on its own (confirmed live:
+  // without this, "Q3" resolved to the wrong year entirely) - stating it
+  // explicitly is the only fix that doesn't depend on the model guessing.
+  const todayIso = new Date().toISOString().slice(0, 10);
 
-  const system = `Convert a salesperson's natural-language search request into a strict JSON object for a CRM Opportunity search. Output ONLY JSON with this exact shape (all fields optional - omit any you can't confidently infer):
+  const system = `Today's date is ${todayIso}. Convert a salesperson's natural-language search request into a strict JSON object for a CRM Opportunity search. Output ONLY JSON with this exact shape (all fields optional - omit any you can't confidently infer):
 {"keyword": string, "stage": one of [${availableStages.map((s) => `"${s}"`).join(', ')}], "minAmount": number, "maxAmount": number, "startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD", "sortBy": one of ["relevance","amount","date","name"]}
-Rules: "won"/"closed won" maps to stage "Closed Won" only if it's in the allowed list above, otherwise omit stage entirely. Interpret relative quarters (Q1-Q4) using the current year unless a year is stated. If the request mentions something with no matching field here (e.g. a unit/quantity count), just omit it - never invent a field that isn't in the shape above. Output only the JSON object, no commentary.`;
+Rules: "won"/"closed won" maps to stage "Closed Won" only if it's in the allowed list above, otherwise omit stage entirely. Interpret relative quarters (Q1-Q4) and terms like "this year"/"last quarter" relative to today's date above unless a year is stated explicitly. If the request mentions something with no matching field here (e.g. a unit/quantity count), just omit it - never invent a field that isn't in the shape above. Output only the JSON object, no commentary.`;
 
   const raw = await chatCompletion(
     [

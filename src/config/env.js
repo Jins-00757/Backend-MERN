@@ -62,7 +62,20 @@ export const config = {
   // Groq AI assistant (chat widget) - server-side only, the key is never
   // sent to the frontend/browser. Free tier key: https://console.groq.com/keys
   groqApiKey: process.env.GROQ_API_KEY,
-  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  // llama-3.3-70b-versatile (the original default here) was retired from
+  // Groq's catalog - confirmed live via GET /openai/v1/models against a real
+  // key, which no longer lists it at all. qwen/qwen3.8-27b was verified as a
+  // safe replacement (real calls, not just docs): it returns plain content
+  // with finish_reason 'stop' for normal chat AND correctly honors
+  // response_format: json_object for the risk-detection/search-parsing
+  // features (see groqService.js). The two openai/gpt-oss-* models Groq also
+  // hosts are reasoning models - they spend the token budget on a hidden
+  // "reasoning" field before ever writing visible content, so a normal
+  // max_tokens value there returns empty output (finish_reason 'length'),
+  // and their JSON mode failed outright in testing (json_validate_failed).
+  // If Groq's catalog changes again, re-verify with real calls, not just
+  // whatever their docs currently list as "recommended".
+  groqModel: process.env.GROQ_MODEL || 'qwen/qwen3.8-27b',
   // Requests/minute the chat endpoint allows across ALL users combined -
   // Groq's free tier is one shared quota per API key, not per-user, so this
   // caps total usage regardless of how many people are chatting at once.

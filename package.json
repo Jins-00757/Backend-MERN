@@ -22,6 +22,7 @@
     "express-rate-limit": "^6.7.0",
     "fast-xml-parser": "^5.11.1",
     "helmet": "^7.0.0",
+    "jsforce": "^3.10.25",
     "jsonwebtoken": "^9.0.0",
     "mongoose": "^7.0.3",
     "multer": "^2.4.0",
