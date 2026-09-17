@@ -1,6 +1,7 @@
 import app from './src/app.js';
 import { config } from './src/config/env.js';
 import { setupWebSocket } from './src/middleware/websocket.js';
+import { setupSocketIO } from './src/realtime/socketServer.js';
 import { startScheduledJobs, stopScheduledJobs } from './src/services/schedulerService.js';
 import { disconnectDB } from './src/config/db.js';
 import { redisClient } from './src/config/redisClient.js';
@@ -37,12 +38,18 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`   ✓ Environment: ${config.nodeEnv}`);
   console.log(`   ✓ Listening on ${HOST}:${PORT}`);
   console.log(`   ✓ WebSocket notifications on ws://${HOST}:${PORT}/ws`);
+  console.log(`   ✓ Socket.IO presence on ws://${HOST}:${PORT}/socket.io`);
   console.log('\n========================================\n');
 });
 
 // Real-time notifications (see middleware/websocket.js) share this same
 // HTTP server/port rather than opening a second listener.
 setupWebSocket(server);
+
+// Multi-user presence (see realtime/socketServer.js) - a separate Socket.IO
+// server on the same HTTP server/port, at its own path ('/socket.io'), so it
+// coexists with the plain-`ws` notification channel above without conflict.
+setupSocketIO(server);
 
 // Daily summary email job (see services/schedulerService.js)
 startScheduledJobs();

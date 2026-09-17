@@ -19,6 +19,8 @@ import saasMetricsRoutes from './routes/saasMetrics.routes.js';
 import searchRoutes from './routes/search.routes.js';
 import exportRoutes from './routes/export.routes.js';
 import webhookRoutes from './routes/webhook.routes.js';
+import chatbotRoutes from './routes/chatbot.routes.js';
+import aiActionsRoutes from './routes/aiActions.routes.js';
 
 // ============================================================================
 // Create Express App
@@ -171,6 +173,15 @@ app.use('/api/data', dataRoutes);
 
   // Secure download-link redemption (see services/downloadTokenService.js)
   app.use('/api/export', exportRoutes);
+
+  // AI assistant chat widget (Groq-backed, see services/groqService.js) -
+  // general CRM help only, never fed live Salesforce/pipeline data.
+  app.use('/api/chatbot', chatbotRoutes);
+
+  // Row-level AI actions (draft email, risk badge, activity summary, exec
+  // summary, discount justification, NL search parsing) - see
+  // controllers/aiActionsController.js.
+  app.use('/api/ai', aiActionsRoutes);
 
   // ========================================================================
   // 404 Handler

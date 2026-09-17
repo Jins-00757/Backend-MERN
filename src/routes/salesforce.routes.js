@@ -150,6 +150,11 @@ router.get('/quotes/:id/recipients', authorize(['read:all']), quotesCtrl.getQuot
 // bulk-operations budget, since sending a few quote emails is normal
 // day-to-day use, not a large-blast-radius Salesforce write.
 router.post('/quotes/:id/email', canWrite, outboundEmailLimiter, quotesCtrl.emailQuotePdf);
+// Records a discount-justification note and notifies the rep's manager -
+// same baseline write permission as any other quote edit, not a
+// Groq-backed endpoint itself (drafting the note's text is a separate call,
+// see /api/ai/quotes/discount-justification).
+router.post('/quotes/:id/discount-justification', canWrite, quotesCtrl.submitDiscountJustification);
 
 // ========================================================================
 // BULK OPERATIONS ROUTES - insert/update/upsert/delete against Salesforce

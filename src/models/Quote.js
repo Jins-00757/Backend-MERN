@@ -54,6 +54,16 @@ const quoteSchema = new mongoose.Schema(
     grandTotalAtClose: Number,
     commissionRate: Number,
     commissionAmount: Number,
+    // Set by POST /quotes/:id/discount-justification (see
+    // quotesController.submitDiscountJustification) when a rep requests
+    // manager approval for an above-threshold discount. `text` may start
+    // from an AI-drafted note (aiActionsController.draftDiscountJustification)
+    // but is always what the rep actually submitted, edited or not.
+    discountJustification: {
+      text: String,
+      discountPercent: Number,
+      submittedAt: Date,
+    },
   },
   {
     timestamps: true,

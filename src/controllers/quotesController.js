@@ -1,6 +1,8 @@
 
 import SalesforceService from '../services/salesforceService.js';
 import Quote from '../models/Quote.js';
+import Team from '../models/Team.js';
+import { checkConflict, logConflict, markConflictResolved, buildConflictResponse, buildDeletedConflictResponse } from '../services/conflictResolutionService.js';
 import cacheService from '../services/CacheService.js';
 import AuditLogger from '../services/AuditLogger.js';
 import NotificationService from '../services/NotificationService.js';
@@ -10,6 +12,12 @@ import { sendQuotePdfEmail } from '../services/emailService.js';
 import { calculateQuoteTotals } from '../utils/quoteCalculations.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// The header fields updateQuote actually accepts (mirrors createQuote's
+// destructured set) - also the whitelist for which field names the conflict
+// check may splice into a dynamic SOQL SELECT (see
+// conflictResolutionService.checkConflict).
+const QUOTE_UPDATABLE_FIELDS = ['Name', 'ExpirationDate', 'Description', 'Discount', 'Tax', 'ShippingHandling', 'Status'];
 
 const invalidateQuoteCaches = async (userId, id) => {
   const tasks = [cacheService.deleteByPrefix(`quotes_${userId}`)];
@@ -51,10 +59,11 @@ const pdfDocToBuffer = (doc) =>
   });
 
 /**
- * Load a quote and its line items together - shared by getQuoteById and the
- * PDF/email endpoints, which all need the exact same combined shape.
+ * Load a quote and its line items together - shared by getQuoteById, the
+ * PDF/email endpoints, and aiActionsController's quote email/risk actions,
+ * which all need the exact same combined shape.
  */
-const loadQuoteWithLineItems = async (salesforce, quoteId) => {
+export const loadQuoteWithLineItems = async (salesforce, quoteId) => {
   const [quoteResult, lineItems] = await Promise.all([
     salesforce.getQuoteById(quoteId),
     salesforce.getQuoteLineItems(quoteId),
@@ -248,14 +257,59 @@ export const createQuote = async (req, res) => {
 export const updateQuote = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = { ...req.body };
+    // baseLastModifiedDate/baseValues/conflictLogId are conflict-model
+    // metadata (see conflictResolutionService.js), not Quote fields - never
+    // forwarded to Salesforce.
+    const { baseLastModifiedDate, baseValues, conflictLogId, ...rawUpdates } = req.body;
 
-    if (updates.Discount !== undefined) updates.Discount = parseFloat(updates.Discount) || 0;
-    if (updates.Tax !== undefined) updates.Tax = parseFloat(updates.Tax) || 0;
-    if (updates.ShippingHandling !== undefined) updates.ShippingHandling = parseFloat(updates.ShippingHandling) || 0;
+    if (rawUpdates.Discount !== undefined) rawUpdates.Discount = parseFloat(rawUpdates.Discount) || 0;
+    if (rawUpdates.Tax !== undefined) rawUpdates.Tax = parseFloat(rawUpdates.Tax) || 0;
+    if (rawUpdates.ShippingHandling !== undefined) rawUpdates.ShippingHandling = parseFloat(rawUpdates.ShippingHandling) || 0;
 
     const salesforce = new SalesforceService(req.user);
+
+    const conflictOutcome = await checkConflict({
+      salesforce,
+      objectType: 'Quote',
+      recordId: id,
+      updatableFields: QUOTE_UPDATABLE_FIELDS,
+      baseLastModifiedDate,
+      baseValues,
+      changedFields: rawUpdates,
+    });
+
+    if (conflictOutcome.status === 'deleted') {
+      return res.status(409).json(buildDeletedConflictResponse('Quote', id));
+    }
+
+    if (conflictOutcome.status === 'conflict') {
+      const log = await logConflict({
+        objectType: 'Quote',
+        recordId: id,
+        userId: req.user._id,
+        conflicts: conflictOutcome.conflicts,
+        baseLastModifiedDate,
+        liveLastModifiedDate: conflictOutcome.liveRecord.LastModifiedDate,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+
+      return res.status(409).json(buildConflictResponse({
+        objectType: 'Quote',
+        recordId: id,
+        conflictLogId: log._id,
+        conflicts: conflictOutcome.conflicts,
+        liveRecord: conflictOutcome.liveRecord,
+      }));
+    }
+
+    const updates = conflictOutcome.changes;
+
     await salesforce.updateQuote(id, updates);
+
+    if (conflictLogId) {
+      markConflictResolved(conflictLogId, updates);
+    }
 
     await invalidateQuoteCaches(req.user._id, id);
 
@@ -268,7 +322,11 @@ export const updateQuote = async (req, res) => {
       message: updates.Status ? `A quote's status changed to ${updates.Status}` : 'A quote was updated',
     });
 
-    res.status(200).json({ success: true, message: 'Quote updated successfully' });
+    res.status(200).json({
+      success: true,
+      message: 'Quote updated successfully',
+      data: { mergedWithConcurrentChanges: conflictOutcome.status === 'merged' },
+    });
   } catch (error) {
     console.error('Error updating quote:', error);
     res.status(error.status || 500).json({ success: false, message: error.message });
@@ -583,6 +641,98 @@ export const emailQuotePdf = async (req, res) => {
   }
 };
 
+/**
+ * @route   POST /api/salesforce/quotes/:id/discount-justification
+ * @desc    Persist a rep-authored (optionally AI-drafted - see
+ *          aiActionsController.draftDiscountJustification, which only drafts
+ *          text and has no side effects) discount justification note against
+ *          this quote's local sync record, and notify the rep's manager for
+ *          approval. Upserts the Quote lock record if createQuote's
+ *          best-effort write never happened (e.g. this quote predates that
+ *          feature, or the original insert failed).
+ * @access  Private
+ */
+export const submitDiscountJustification = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { opportunityId, quoteName, accountName, discountPercent, justificationText } = req.body;
+
+    if (!opportunityId || !quoteName) {
+      return res.status(400).json({ success: false, message: 'opportunityId and quoteName are required' });
+    }
+    if (typeof justificationText !== 'string' || !justificationText.trim()) {
+      return res.status(400).json({ success: false, message: 'justificationText is required' });
+    }
+    const trimmedText = justificationText.trim().slice(0, 2000);
+
+    const parsedDiscount = Number(discountPercent);
+    const safeDiscount = Number.isFinite(parsedDiscount) ? Math.min(100, Math.max(0, parsedDiscount)) : 0;
+
+    const quoteDoc = await Quote.findOneAndUpdate(
+      { salesforceQuoteId: id },
+      {
+        $setOnInsert: {
+          userId: req.user._id,
+          salesforceQuoteId: id,
+          opportunityId,
+          name: quoteName,
+          accountName: accountName || undefined,
+        },
+        $set: {
+          discountJustification: {
+            text: trimmedText,
+            discountPercent: safeDiscount,
+            submittedAt: new Date(),
+          },
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    // Best-effort: resolve the rep's manager via the Team they belong to and
+    // push a live notification. If they aren't on any team, the
+    // justification is still recorded above - there's just no one to notify.
+    let managerId = null;
+    try {
+      const team = await Team.findOne({ members: req.user._id, isActive: true });
+      managerId = team?.managerId?.toString() || null;
+    } catch (teamError) {
+      console.error('Failed to resolve manager for discount justification:', teamError.message);
+    }
+
+    if (managerId) {
+      NotificationService.notify(managerId, 'quote.discount_justification', {
+        title: 'Discount approval requested',
+        message: `${req.user.name} requested approval for a ${safeDiscount}% discount on "${quoteName}" (${accountName || 'unknown account'})`,
+        resourceId: id,
+      });
+    }
+
+    await AuditLogger.log('NOTIFY', {
+      userId: req.user._id,
+      resourceType: 'Quote',
+      resourceId: id,
+      eventType: 'quote.discount_justification',
+      title: 'Discount justification submitted',
+      message: `Discount justification submitted for "${quoteName}" (${safeDiscount}%)`,
+      changes: { discountPercent: safeDiscount, managerNotified: Boolean(managerId) },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    }).catch((err) => console.error('Failed to audit-log discount justification:', err.message));
+
+    res.status(200).json({
+      success: true,
+      message: managerId
+        ? 'Discount justification submitted to your manager for approval.'
+        : 'Discount justification saved. No manager is currently assigned to your team, so no notification was sent.',
+      data: { managerNotified: Boolean(managerId), submittedAt: quoteDoc.discountJustification.submittedAt },
+    });
+  } catch (error) {
+    console.error('Error submitting discount justification:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+};
+
 export default {
   getQuoteStatuses,
   getProductCatalog,
@@ -595,4 +745,5 @@ export default {
   getQuotePdfLink,
   getQuoteRecipients,
   emailQuotePdf,
+  submitDiscountJustification,
 };

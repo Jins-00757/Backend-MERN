@@ -6,6 +6,14 @@ import cacheService from '../services/CacheService.js';
 import NotificationService from '../services/NotificationService.js';
 import AuditLogger from '../services/AuditLogger.js';
 import { sendDealStageChangeEmail } from '../services/emailService.js';
+import { checkConflict, logConflict, markConflictResolved, buildConflictResponse, buildDeletedConflictResponse } from '../services/conflictResolutionService.js';
+
+// The fields updateOpportunity actually accepts (mirrors createOpportunity's
+// destructured set) - also doubles as the whitelist for which field names
+// the conflict check is allowed to splice into a dynamic SOQL SELECT (see
+// conflictResolutionService.checkConflict), since field *names* can't be
+// parameterized the way soqlEscape parameterizes values.
+const OPPORTUNITY_UPDATABLE_FIELDS = ['Name', 'StageName', 'CloseDate', 'Amount', 'AccountId', 'Description'];
 
 /**
  * Every cache namespace that depends on opportunity data - the single-record
@@ -285,21 +293,67 @@ export const createOpportunity = async (req, res) => {
 export const updateOpportunity = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
+    // baseLastModifiedDate/baseValues/conflictLogId are conflict-model
+    // metadata (see conflictResolutionService.js) - they describe the edit
+    // form's starting point, not fields to write to Salesforce, so they're
+    // stripped out of `rawUpdates` before it ever reaches salesforce.updateOpportunity.
+    const { baseLastModifiedDate, baseValues, conflictLogId, ...rawUpdates } = req.body;
 
     // Validate close date if provided
-    if (updates.CloseDate && new Date(updates.CloseDate) < new Date()) {
+    if (rawUpdates.CloseDate && new Date(rawUpdates.CloseDate) < new Date()) {
       return res.status(400).json({
         success: false,
         message: 'Close date must be in the future',
       });
     }
 
-    if (updates.Amount !== undefined) {
-      updates.Amount = parseFloat(updates.Amount);
+    if (rawUpdates.Amount !== undefined) {
+      rawUpdates.Amount = parseFloat(rawUpdates.Amount);
     }
 
     const salesforce = new SalesforceService(req.user);
+
+    const conflictOutcome = await checkConflict({
+      salesforce,
+      objectType: 'Opportunity',
+      recordId: id,
+      updatableFields: OPPORTUNITY_UPDATABLE_FIELDS,
+      baseLastModifiedDate,
+      baseValues,
+      changedFields: rawUpdates,
+    });
+
+    if (conflictOutcome.status === 'deleted') {
+      return res.status(409).json(buildDeletedConflictResponse('Opportunity', id));
+    }
+
+    if (conflictOutcome.status === 'conflict') {
+      const log = await logConflict({
+        objectType: 'Opportunity',
+        recordId: id,
+        userId: req.user._id,
+        conflicts: conflictOutcome.conflicts,
+        baseLastModifiedDate,
+        liveLastModifiedDate: conflictOutcome.liveRecord.LastModifiedDate,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+
+      return res.status(409).json(buildConflictResponse({
+        objectType: 'Opportunity',
+        recordId: id,
+        conflictLogId: log._id,
+        conflicts: conflictOutcome.conflicts,
+        liveRecord: conflictOutcome.liveRecord,
+      }));
+    }
+
+    // 'no-baseline' | 'clean' | 'merged' - safe to apply. In every one of
+    // these three statuses `changes` is either exactly `rawUpdates` or a
+    // subset of it that's already been proven safe field-by-field, so
+    // everything below can keep using the short `updates` name without
+    // caring which case it was.
+    const updates = conflictOutcome.changes;
 
     // Snapshot the current record before updating - needed both to detect a
     // stage change (triggers the notification email) and to label the
@@ -308,6 +362,10 @@ export const updateOpportunity = async (req, res) => {
     const before = await getOpportunitySnapshot(salesforce, id);
 
     await salesforce.updateOpportunity(id, updates);
+
+    if (conflictLogId) {
+      markConflictResolved(conflictLogId, updates);
+    }
 
     // Invalidate cache
     await invalidateOpportunityCaches(req.user._id, id);
@@ -347,6 +405,7 @@ export const updateOpportunity = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Opportunity updated successfully',
+      data: { mergedWithConcurrentChanges: conflictOutcome.status === 'merged' },
     });
   } catch (error) {
     console.error('Error updating opportunity:', error);

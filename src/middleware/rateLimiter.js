@@ -2,6 +2,7 @@
 import rateLimit from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import { redisClient, connectRedis } from '../config/redisClient.js';
+import { config } from '../config/env.js';
 
 // RedisStore loads a Lua script synchronously as soon as it's constructed,
 // so the client must already be connected by the time makeStore() runs
@@ -149,6 +150,64 @@ export const webhookLimiter = rateLimit({
     res.status(429).json({
       success: false,
       message: 'Too many webhook requests - please try again shortly.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});
+
+// Every Groq-backed feature (the chat widget AND the row-level AI actions in
+// aiActionsController.js) shares these two limiter layers, both of which
+// must pass:
+//   1. Per-user (chatbotLimiter / aiActionsLimiter below): stops a single
+//      account (a runaway retry loop, someone spamming a button, or clicking
+//      "Detect Risk" across a huge table) from hogging the shared Groq quota.
+//   2. groqGlobalLimiter: Groq's free tier is ONE quota shared by this app's
+//      single server-side API key across every user and every feature - a
+//      generous per-user cap alone can't stop enough concurrent users from
+//      collectively exhausting it and breaking the assistant for everyone
+//      else. GROQ_CHAT_RPM_GLOBAL should be tuned to whatever your actual
+//      Groq plan/model allows.
+export const chatbotLimiter = rateLimit({
+  store: makeStore('rate-limit-chatbot:'),
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 15,
+  keyGenerator: (req) => req.user._id.toString(),
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many AI assistant messages - please wait a few minutes and try again.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});
+
+// Row-level AI actions (draft email, risk badge, activity summary, exec
+// summary, discount justification, NL search parsing) - a more generous
+// per-user ceiling than the chat widget since these are quick, single-shot
+// calls a rep might reasonably trigger across many rows in one session.
+export const aiActionsLimiter = rateLimit({
+  store: makeStore('rate-limit-ai-actions:'),
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 40,
+  keyGenerator: (req) => req.user._id.toString(),
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'Too many AI actions - please wait a few minutes and try again.',
+      retryAfter: req.rateLimit.resetTime,
+    });
+  },
+});
+
+export const groqGlobalLimiter = rateLimit({
+  store: makeStore('rate-limit-groq-global:'),
+  windowMs: 60 * 1000, // 1 minute
+  max: config.groqChatRpmGlobal,
+  keyGenerator: () => 'global',
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: 'The AI assistant is handling a lot of requests right now - please try again in a minute.',
       retryAfter: req.rateLimit.resetTime,
     });
   },

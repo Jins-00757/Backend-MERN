@@ -58,6 +58,16 @@ export const config = {
   // middle-tier) signs the inbound webhook body with - see
   // middleware/salesforceWebhook.js and routes/webhook.routes.js.
   salesforceWebhookSecret: process.env.SALESFORCE_WEBHOOK_SECRET,
+
+  // Groq AI assistant (chat widget) - server-side only, the key is never
+  // sent to the frontend/browser. Free tier key: https://console.groq.com/keys
+  groqApiKey: process.env.GROQ_API_KEY,
+  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  // Requests/minute the chat endpoint allows across ALL users combined -
+  // Groq's free tier is one shared quota per API key, not per-user, so this
+  // caps total usage regardless of how many people are chatting at once.
+  // Tune to your actual plan: https://console.groq.com/docs/rate-limits
+  groqChatRpmGlobal: parseInt(process.env.GROQ_CHAT_RPM_GLOBAL || '25', 10),
 };
  
 // ============================================================================
@@ -116,7 +126,14 @@ if (!config.salesforceWebhookSecret) {
 if (!config.emailUser || !config.emailPassword) {
   console.warn('⚠️  Warning: EMAIL_USER/EMAIL_PASSWORD not configured - password reset emails will not send');
 }
- 
+
+// Groq AI assistant warning - the chat widget checks GET /api/chatbot/status
+// and hides itself on the frontend when this is unset, so a missing key is a
+// silently-disabled feature, not a broken one.
+if (!config.groqApiKey) {
+  console.warn('⚠️  Warning: GROQ_API_KEY not set - the AI assistant chat widget will be disabled');
+}
+
 // Development warning
 if (config.nodeEnv === 'development') {
   console.log('ℹ️  Running in development mode');
