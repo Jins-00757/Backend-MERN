@@ -101,3 +101,32 @@ export const approveQuoteAndSyncToSalesforce = async (user, { quoteId, status })
 
   return { quoteId, previousStatus: existing.Status, newStatus: status };
 };
+
+/**
+ * The three atomic creates behind the multi-step "create an Account, link an
+ * Opportunity, generate a Quote" agentic workflow (see aiToolsService.js for
+ * the planning loop and the ordered, placeholder-substituted execution that
+ * calls these). Each is a thin, generic jsforce sobject().create() - field
+ * mapping/validation/defaults (e.g. resolving a Quote's Pricebook2Id) happen
+ * in aiToolsService before the record data reaches here, exactly like
+ * approveQuoteAndSyncToSalesforce above takes already-Salesforce-shaped
+ * input rather than doing its own field mapping.
+ */
+const createSobject = async (user, sobjectType, data) => {
+  const conn = getJsforceConnection(user);
+  const result = await conn.sobject(sobjectType).create(data);
+
+  if (!result.success) {
+    const err = new Error(result.errors?.[0]?.message || `Salesforce rejected the new ${sobjectType}`);
+    err.status = 400;
+    throw err;
+  }
+
+  return { id: result.id };
+};
+
+export const createAccountViaJsforce = (user, accountData) => createSobject(user, 'Account', accountData);
+
+export const createOpportunityViaJsforce = (user, opportunityData) => createSobject(user, 'Opportunity', opportunityData);
+
+export const createQuoteViaJsforce = (user, quoteData) => createSobject(user, 'Quote', quoteData);

@@ -84,40 +84,46 @@ export const sendActionMessage = async (req, res) => {
 
 /**
  * @route   POST /api/ai/assistant/confirm
- * @desc    Executes exactly one previously-proposed mutating tool call after
- *          explicit user confirmation - see aiToolsService.confirmPendingAction
- *          for the re-validation this performs (Quote Status re-checked
- *          against the org's live picklist, the write itself run through
- *          jsforce) before anything reaches Salesforce. That function does
- *          its own detailed audit log entry, so this controller doesn't
- *          duplicate one on success.
- * @access  Private - canWrite (same permission a manual quote status change
+ * @desc    Executes a previously-proposed plan (one or more ordered steps -
+ *          e.g. create Account, then Opportunity, then Quote, chaining each
+ *          step's real Salesforce Id into the next) after explicit user
+ *          confirmation - see aiToolsService.confirmPendingAction for the
+ *          re-validation and sequential, id-chaining execution this
+ *          performs via jsforce before anything reaches Salesforce. That
+ *          function does its own detailed audit log entry per step, so this
+ *          controller only logs once, on a failure, to capture how far the
+ *          plan got.
+ * @access  Private - canWrite (same permission a manual create/update
  *          requires, see quotesController.updateQuote / salesforce.routes.js)
  */
 export const confirmAction = async (req, res) => {
-  const { tool, args } = req.body;
+  const { steps } = req.body;
 
-  if (typeof tool !== 'string' || !tool) {
-    return res.status(400).json({ success: false, message: 'tool is required' });
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return res.status(400).json({ success: false, message: 'steps is required' });
   }
 
   try {
-    const result = await confirmPendingAction(req, { tool, args: args || {} });
+    const result = await confirmPendingAction(req, { steps });
     res.status(200).json({ success: true, message: 'Action completed', data: result });
   } catch (error) {
     console.error('CRM action confirmation error:', error);
 
     AuditLogger.log('UPDATE', {
       userId: req.user._id,
-      resourceType: 'Quote',
-      resourceId: args?.quoteId || null,
-      eventType: 'quote.ai_approved_and_synced',
+      resourceType: 'ChatbotMessage',
+      eventType: 'assistant.workflow_failed',
       status: 'failure',
       errorMessage: error.message,
+      changes: { requestedSteps: steps.length, completedSteps: error.completed?.length || 0 },
       ipAddress: req.ip,
       userAgent: req.get('user-agent'),
     }).catch((err) => console.error('Failed to audit-log assistant confirmation failure:', err.message));
 
-    res.status(error.statusCode || error.status || 500).json({ success: false, message: error.message });
+    res.status(error.statusCode || error.status || 500).json({
+      success: false,
+      message: error.message,
+      data: { completed: error.completed || [] },
+    });
   }
 };
